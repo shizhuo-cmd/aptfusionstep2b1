@@ -1,0 +1,111 @@
+ocr_apt_root: ""
+tapas_root: ""
+
+dataset_family: "tc3"          # tc3 | optc
+host: "trace"
+source_logs: "D:/data/trace/logs"
+
+artifacts_dir: "D:/daima/APT-Fusion/artifacts_local"
+ocr_runtime_root: "D:/daima/APT-Fusion/runtime/local/experiments/"
+ocr_exp_name: "fusion_exp"
+ocr_model_name: "tapas_native.model"
+ocr_inv_exp_name: "fusion_investigation"
+
+use_sequence_embeddings: true
+use_ocr_stat_features: true
+ocr_stat_active_threshold_sec: 1.0
+
+task_detection_backend: "tapas_native"
+task_detector_mode: "fit_predict"   # fit_predict | load_and_predict
+task_detector_model_input: ""
+task_detector_model_output: ""
+task_ground_truth_path: ""
+
+random_seed: 173
+task_graph_stat_late_fusion_enabled: true
+task_graph_stat_fusion_weight: 0.25
+
+task_classifier_hidden_dim: 64
+task_classifier_num_layers: 2
+task_classifier_dropout: 0.5
+task_classifier_lr: 0.001
+task_classifier_weight_decay: 0.0005
+task_classifier_epochs: 100
+task_classifier_batch_size: 500
+task_classifier_pooling: "max"
+task_decision_threshold: 0.5
+task_decision_threshold_mode: "fixed"
+task_fit_test_fraction: 0.2
+task_min_graph_nodes: 2
+task_graph_bidirectional_edges: false
+task_graph_self_loops: false
+task_tapas_augmentation_enabled: true
+task_tapas_augmentation_divisor: 2000
+task_tapas_trace_augmentation_bonus: 0
+task_tapas_augmentation_before_split: true
+task_tapas_faithful_mode: true
+
+number_of_hops: 1
+max_edges: 5000
+top_k: 15
+abnormality_level: "Moderate"
+
+llm_exp_name: "fusion_llm"
+llm_model_source: "ollama"      # ollama is the supported reasoning path
+llm_model: "llama3_1_8b_instruct_ms_q3km"
+llm_embedding_model_source: "ollama"
+llm_embedding_model: "granite-embedding:278m"
+llm_openai_api_key: ""
+llm_deepseek_api_key: ""
+llm_ollama_base_url: "http://127.0.0.1:11434"
+llm_request_timeout_sec: 1800
+
+graphdb_repository_url: ""
+graphdb_username: ""
+graphdb_password: ""
+
+local_context_hops: 1
+module3_task_selection_mode: "predicted_positive"   # predicted_positive | ground_truth_positive | ground_truth_positive_base_only
+task_component_split_mode: "fanout"                 # fanout | connected
+task_component_child_threshold: 2
+
+attack_kb_stix_path: "D:/data/attack-stix-data/enterprise-attack.json"
+attack_kb_candidate_limit: 12
+attack_kb_embedding_model_name: "sentence-transformers/all-MiniLM-L6-v2"
+attack_kb_sparse_top_k: 24
+attack_kb_vector_top_k: 24
+attack_kb_sparse_weight: 0.45
+attack_kb_vector_weight: 0.55
+attack_kb_claim_weight: 0.25
+attack_kb_enable_vector: false
+
+path_reason_enabled: true
+evidence_recover_include_object_side: true
+evidence_recover_max_events_per_task: 300000
+evidence_recover_task_time_padding_minutes: 30
+evidence_recover_anchor_top_k: 3
+
+semantic_skip_enabled: true
+semantic_skip_ttl_seconds: 600
+semantic_skip_max_table_size: 100000
+semantic_force_keep_external_network: true
+semantic_force_keep_exec: true
+semantic_force_keep_write_sensitive: true
+
+episode_max_representative_events: 5
+episode_time_bucket_minutes: 1
+
+path_bridge_max_time_gap_minutes: 30
+path_max_depth: 6
+path_max_total_span_minutes: 180
+path_hot_process_threshold: 25.0
+path_top_k: 20
+path_require_execution_strong_for_high: true
+path_allow_weak_execution_medium: true
+
+reason_top_paths_per_task: 5
+reason_max_timeline_items_per_path: 24
+reason_max_bridge_edges_per_path: 8
+reason_max_objects_per_path: 12
+
+path_reason_rules_path: "D:/daima/APT-Fusion/configs/path_reason_default.yaml"

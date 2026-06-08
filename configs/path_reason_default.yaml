@@ -1,0 +1,919 @@
+version: 1
+
+path_reason:
+  enabled: true
+
+normalization:
+  unknown_event_type: "UNKNOWN"
+  default_syscall_direction: "UNKNOWN"
+  default_semantic_flow_direction: "UNKNOWN"
+  map_event_types:
+    EXECUTE: "EXEC"
+    CREATE_OBJECT: "CREATE"
+    LOAD_ELF: "LOAD"
+    LOADLIBRARY: "LOAD"
+    SENDMSG: "SEND"
+    SENDTO: "SEND"
+    RECVMSG: "RECV"
+    RECVFROM: "RECV"
+    FORK_WITH_SHARED_OPEN_FILE: "FORK"
+    OPEN_WITH_CLOSE_ON_EXEC: "OPEN"
+    MODIFY_PROCESS: "CHMOD"
+
+event_model:
+  external_network_event_types: ["CONNECT", "ACCEPT", "SEND", "RECV"]
+  process_control_event_types: ["RECV", "EXEC", "LOAD", "MMAP"]
+  object_mutation_event_types: ["WRITE", "CREATE", "TRUNCATE", "CHMOD", "CHOWN", "RENAME", "DELETE"]
+  force_keep_event_types:
+    [
+      "EXEC",
+      "FORK",
+      "CLONE",
+      "CONNECT",
+      "ACCEPT",
+      "SEND",
+      "RECV",
+      "WRITE",
+      "READ",
+      "CHMOD",
+      "CHOWN",
+      "RENAME",
+      "DELETE",
+      "EXIT",
+    ]
+
+paths:
+  temp_dirs: ["/tmp", "/var/tmp", "/dev/shm"]
+  web_roots:
+    ["/var/www/", "/usr/share/nginx/html/", "/srv/www/", "/opt/tomcat/webapps/", "/www/"]
+  upload_markers: ["upload", "uploads", "wwwroot", "webapps", "htdocs"]
+  credential_paths:
+    [
+      "/etc/passwd",
+      "/etc/shadow",
+      ".ssh/id_rsa",
+      ".ssh/id_dsa",
+      ".ssh/authorized_keys",
+      ".aws/credentials",
+      ".kube/config",
+    ]
+  history_paths: [".bash_history", ".zsh_history", ".mysql_history", ".python_history"]
+  privilege_paths: ["/etc/sudoers", "/etc/sudoers.d"]
+  persistence_paths:
+    [
+      "/etc/crontab",
+      "/etc/cron.d",
+      "/var/spool/cron",
+      "/etc/systemd/system",
+      "/lib/systemd/system",
+      "/etc/rc.local",
+      ".config/autostart",
+      ".ssh/authorized_keys",
+    ]
+  auth_config_paths: ["/etc/ssh/", "/etc/pam.d/", "/etc/security/", "/etc/login.defs", "/root/.ssh/"]
+  log_paths: ["/var/log", "/var/log/auth.log", "/var/log/secure", "/var/log/audit"]
+  system_low_value_dirs: ["/usr/lib", "/lib", "/lib64", "/usr/share", "/usr/include", "/usr/share/locale"]
+  business_data_paths:
+    ["/data/business/", "/opt/app/data/", "/srv/data/", "/home/*/Documents/", "*.sql", "*.db", "*.sqlite", "*.xlsx", "*.docx", "*.csv"]
+
+process_names:
+  web_services: ["nginx", "httpd", "apache2", "php-fpm", "php-cgi", "tomcat", "uwsgi", "gunicorn", "node"]
+  remote_services: ["sshd", "dropbear", "telnetd", "xrdp", "sftp-server"]
+  shells: ["sh", "bash", "zsh", "dash"]
+  interpreters: ["python", "python3", "perl", "php", "node", "ruby", "lua"]
+  downloaders: ["curl", "wget", "scp", "sftp", "ftp", "python", "perl", "php", "node"]
+  network_tools: ["curl", "wget", "scp", "sftp", "ftp", "nc", "ncat", "socat", "ssh"]
+  archive_tools: ["tar", "zip", "gzip", "bzip2", "xz", "7z"]
+  encode_tools: ["base64", "openssl", "xxd"]
+  common_daemons: ["systemd", "cron", "crond", "sshd", "nginx", "apache2", "httpd", "mysqld", "redis-server", "rsyslogd", "dbus-daemon"]
+
+network:
+  internal_cidrs: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8"]
+  web_ports: [80, 443, 8000, 8080, 8443, 8888]
+  remote_admin_ports: [22, 2222, 23, 3389, 5900]
+  lateral_ports: [22, 445, 3389, 3306, 5432, 6379, 9200, 27017]
+  public_shared_ip_suffixes: []
+
+object_classes:
+  temp_file:
+    path_prefixes: ["/tmp/", "/var/tmp/", "/dev/shm/"]
+  credential_file:
+    exact_or_contains: ["/etc/passwd", "/etc/shadow", ".ssh/id_rsa", ".aws/credentials", ".kube/config"]
+  history_file:
+    exact_or_contains: [".bash_history", ".zsh_history", ".mysql_history", ".python_history"]
+  persistence_file:
+    exact_or_prefix: ["/etc/crontab", "/etc/cron.d", "/var/spool/cron", "/etc/systemd/system", "/lib/systemd/system", "/etc/rc.local"]
+  privilege_file:
+    exact_or_prefix: ["/etc/sudoers", "/etc/sudoers.d"]
+  auth_config_file:
+    exact_or_prefix: ["/etc/ssh/", "/etc/pam.d/", "/etc/security/", "/etc/login.defs", "/root/.ssh/"]
+  log_file:
+    exact_or_prefix: ["/var/log", "/var/log/auth.log", "/var/log/secure", "/var/log/audit"]
+  archive_file:
+    suffixes: [".zip", ".tar", ".gz", ".tgz", ".7z", ".rar"]
+  business_file:
+    path_matches_config: "paths.business_data_paths"
+  system_library:
+    path_prefixes: ["/usr/lib", "/lib", "/lib64"]
+  system_resource:
+    path_prefixes: ["/usr/share", "/usr/include", "/usr/share/locale"]
+  proc_status:
+    path_prefixes: ["/proc/"]
+  external_ip:
+    by_network_role: "external"
+  internal_ip:
+    by_network_role: "internal"
+  local_ipc:
+    exact_or_prefix: ["127.0.0.1", "localhost", "unix:"]
+
+semantic_skip:
+  enabled: true
+  ttl_seconds: 600
+  max_table_size: 100000
+  clear_when_full: true
+  ignore_if_timestamp_missing: false
+  force_keep:
+    event_types: ["EXEC", "FORK", "CLONE", "CONNECT", "ACCEPT", "SEND", "RECV", "EXIT", "CHMOD", "CHOWN", "RENAME", "DELETE"]
+    object_classes: ["temp_file", "credential_file", "history_file", "business_file", "persistence_file", "privilege_file", "external_ip"]
+  invalidation:
+    on_object_mutation: true
+    on_external_recv_into_process: true
+    on_exec_into_process: true
+    on_fork_initialize_child_context: true
+
+episode_aggregation:
+  enabled: true
+  bucket_minutes: 1
+  max_representative_events: 5
+  keep_first_last: true
+  keep_label_trigger_events: true
+  keep_mid_samples_when_count_gte: 10
+
+propagation:
+  status_labels: ["P_WEB_CTX", "P_REMOTE_CTX", "P_NET_CTX", "P_UNTRUSTED_CTX", "P_HIGH_VALUE_CTX", "P_SUSPECT_CTRL_CTX"]
+  max_depth_by_label:
+    P_HIGH_VALUE_CTX: 1
+    P_NET_CTX: 2
+    P_WEB_CTX: 2
+    P_REMOTE_CTX: 4
+    P_UNTRUSTED_CTX: 3
+    P_SUSPECT_CTRL_CTX: 3
+  max_time_gap_minutes: 120
+  daemon_child_allow_types: ["shell", "interpreter", "downloader", "network_tool", "unknown_binary"]
+  stop_after_consecutive_low_risk_layers: 2
+
+bridging:
+  max_time_gap_minutes: 30
+  per_object_edge_limit: 20
+  writers_event_types: ["WRITE", "CREATE", "RENAME"]
+  readers_or_execs_event_types: ["READ", "EXEC", "MMAP", "LOAD"]
+  require_lifetime_causal_possible: true
+  require_same_or_valid_semantic_epoch: true
+  allow_object_labels:
+    ["O_FILE_TEMP", "O_FILE_DOWNLOADED", "O_FILE_UPLOADED", "O_SUSPECT_WRITTEN_EXECUTABLE", "O_ARCHIVE", "O_PERSISTENCE", "O_PRIV_CONFIG"]
+  deny_object_labels:
+    ["O_CREDENTIAL", "O_HISTORY", "O_BUSINESS_DATA", "O_NET_EXTERNAL", "O_NET_INTERNAL", "O_AUTH_CONFIG", "O_SECURITY_LOG"]
+  deny_object_classes: ["system_library", "system_resource", "proc_status"]
+
+path_search:
+  max_depth: 6
+  max_total_span_minutes: 180
+  max_time_gap_minutes: 120
+  top_k: 20
+  hot_process_threshold: 25.0
+  require_execution_strong_for_high: true
+  strong_stage_sets:
+    [
+      ["Entry", "ExecutionStrong", "TargetAccess"],
+      ["Entry", "ExecutionStrong", "FollowUp"],
+      ["ExecutionStrong", "TargetAccess", "FollowUp"],
+    ]
+  weak_stage_sets:
+    [["Entry", "ExecutionWeak"], ["Entry", "TargetAccess"], ["ExecutionWeak", "FollowUp"]]
+  medium_upgrade_rules:
+    [["Entry", "ExecutionWeak", "TargetAccess"], ["Entry", "ExecutionWeak", "FollowUp"]]
+  risk_levels:
+    high: 80.0
+    medium: 50.0
+    low: 30.0
+
+scoring:
+  labels:
+    P_NET_CTX: 3
+    P_UNTRUSTED_CTX: 5
+    P_WEB_CTX: 3
+    P_REMOTE_CTX: 4
+    P_HIGH_VALUE_CTX: 8
+    P_SUSPECT_CTRL_CTX: 8
+    A_CHILD_SUSPICIOUS: 5
+    A_BRIDGED_BY_SUSPICIOUS_OBJECT: 8
+    B_EXTERNAL_RECV: 8
+    B_EXTERNAL_SEND: 20
+    B_EXEC_TEMP: 20
+    B_EXEC_DOWNLOADED: 30
+    B_EXEC_UPLOADED: 24
+    B_EXEC_SUSPECT_WRITTEN: 28
+    B_SHELL_SPAWN: 8
+    B_SCRIPT_EXEC: 8
+    B_INTERPRETER_LAUNCH: 6
+    B_READ_CRED: 15
+    B_READ_HISTORY: 12
+    B_READ_BUSINESS: 18
+    B_MASS_FILE_ACCESS: 10
+    B_WRITE_PERSISTENCE: 30
+    B_WRITE_PRIV_CONFIG: 30
+    B_ARCHIVE_DATA: 18
+    B_DELETE_LOG: 25
+    B_LATERAL_CONNECT: 20
+    B_REMOTE_LOGIN_SERVICE: 5
+    B_WEB_WRITE: 4
+  combos:
+    external_plus_temp_exec: 30
+    external_plus_shell: 20
+    downloaded_write_then_exec: 40
+    suspicious_exec_plus_sensitive_read: 30
+    sensitive_read_plus_external_send: 40
+    suspicious_exec_plus_persistence: 45
+    suspicious_exec_plus_lateral: 30
+    continuous_labeled_chain: 20
+  penalties:
+    common_daemon_normal_child: 15
+    whitelist_process: 20
+    high_reuse_object: 20
+    weak_execution_only: 15
+    single_point_sensitive_read: 20
+    time_gap_too_large: 20
+    low_value_object: 10
+  apt_fusion_prior:
+    graph_task_score_weight: 20.0
+    top_process_rank_weight: 10.0
+    top_edge_rank_weight: 10.0
+    in_task_time_range_bonus: 8.0
+    out_of_task_time_range_penalty: 12.0
+
+reporting:
+  top_paths_per_task: 5
+  max_timeline_items_per_path: 24
+  max_bridge_edges_per_path: 8
+  max_objects_per_path: 12
+  include_compression_stats: true
+  include_warnings: true
+  markdown_disclaimer: "This is a candidate attack path used to narrow the investigation scope. It is not a confirmed attack conclusion."
+
+labels:
+  P_WEB_CTX:
+    category: "context"
+    stage_mapping: "Entry"
+    bridge_allowed: false
+    score: 3
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "web_process_name"
+        when:
+          process_name_in_ref: "process_names.web_services"
+      - name: "inbound_web_port"
+        when:
+          event_type_in: ["LISTEN", "ACCEPT", "RECV"]
+          local_port_in_ref: "network.web_ports"
+      - name: "web_path_access"
+        when:
+          event_type_in: ["READ", "WRITE", "EXEC"]
+          object_path_prefix_in_ref: "paths.web_roots"
+      - name: "upload_write"
+        when:
+          event_type_in: ["WRITE", "CREATE"]
+          object_path_contains_any_ref: "paths.upload_markers"
+        also_add_behavior_labels: ["B_WEB_WRITE"]
+        also_add_object_labels: ["O_FILE_UPLOADED"]
+    propagation_rules:
+      - name: "web_parent_to_suspicious_child"
+        child_type_in: ["shell", "interpreter", "downloader", "unknown_binary"]
+        also_add_status_labels: ["P_SUSPECT_CTRL_CTX"]
+
+  P_REMOTE_CTX:
+    category: "context"
+    stage_mapping: "Entry"
+    bridge_allowed: false
+    score: 4
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "remote_service_process"
+        when:
+          process_name_in_ref: "process_names.remote_services"
+      - name: "inbound_remote_port"
+        when:
+          event_type_in: ["ACCEPT", "RECV"]
+          local_port_in_ref: "network.remote_admin_ports"
+        also_add_behavior_labels: ["B_REMOTE_LOGIN_SERVICE"]
+      - name: "tty_pts_from_remote_parent"
+        when:
+          tty_pattern: "pts/*"
+          parent_process_name_in_ref: "process_names.remote_services"
+    propagation_rules:
+      - name: "remote_parent_to_child"
+        child_type_in: ["shell", "interpreter", "downloader", "network_tool"]
+
+  P_NET_CTX:
+    category: "context"
+    stage_mapping: "Entry"
+    bridge_allowed: false
+    score: 3
+    confidence: "medium"
+    ttl_minutes: 120
+    init_rules:
+      - name: "external_network_contact"
+        when:
+          event_type_in: ["CONNECT", "ACCEPT", "SEND", "RECV"]
+          object_class_in: ["external_ip"]
+    propagation_rules: []
+
+  P_UNTRUSTED_CTX:
+    category: "context"
+    stage_mapping: "Entry"
+    bridge_allowed: false
+    score: 5
+    confidence: "medium"
+    ttl_minutes: 120
+    init_rules:
+      - name: "external_recv_into_process"
+        when:
+          event_type_in: ["RECV"]
+          object_class_in: ["external_ip"]
+      - name: "exec_uploaded_or_downloaded_object"
+        when:
+          event_type_in: ["EXEC", "LOAD", "MMAP"]
+          object_has_label_any: ["O_FILE_DOWNLOADED", "O_FILE_UPLOADED", "O_SUSPECT_WRITTEN_EXECUTABLE"]
+    propagation_rules: []
+
+  P_HIGH_VALUE_CTX:
+    category: "context"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 8
+    confidence: "medium"
+    ttl_minutes: 60
+    init_rules:
+      - name: "reads_credential"
+        when:
+          event_type_in: ["READ"]
+          object_class_in: ["credential_file"]
+      - name: "reads_history"
+        when:
+          event_type_in: ["READ"]
+          object_class_in: ["history_file"]
+      - name: "reads_business_data"
+        when:
+          event_type_in: ["READ"]
+          object_class_in: ["business_file"]
+    propagation_rules: []
+
+  P_SUSPECT_CTRL_CTX:
+    category: "context"
+    stage_mapping: "ExecutionWeak"
+    bridge_allowed: false
+    score: 8
+    confidence: "medium"
+    ttl_minutes: 120
+    init_rules:
+      - name: "exec_downloaded"
+        when:
+          event_type_in: ["EXEC", "LOAD", "MMAP"]
+          object_has_label_any: ["O_FILE_DOWNLOADED", "O_FILE_UPLOADED", "O_SUSPECT_WRITTEN_EXECUTABLE"]
+    propagation_rules: []
+
+  B_EXTERNAL_RECV:
+    category: "behavior"
+    stage_mapping: "Entry"
+    bridge_allowed: false
+    score: 8
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "recv_external_ip"
+        when:
+          event_type_in: ["RECV"]
+          object_class_in: ["external_ip"]
+    propagation_rules: []
+
+  B_EXTERNAL_SEND:
+    category: "behavior"
+    stage_mapping: "FollowUp"
+    bridge_allowed: false
+    score: 20
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "send_external_ip"
+        when:
+          event_type_in: ["SEND"]
+          object_class_in: ["external_ip"]
+    propagation_rules: []
+
+  B_EXEC_TEMP:
+    category: "behavior"
+    stage_mapping: "ExecutionStrong"
+    bridge_allowed: false
+    score: 20
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "exec_temp_file"
+        when:
+          event_type_in: ["EXEC"]
+          object_class_in: ["temp_file"]
+    propagation_rules: []
+
+  B_EXEC_DOWNLOADED:
+    category: "behavior"
+    stage_mapping: "ExecutionStrong"
+    bridge_allowed: false
+    score: 30
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "exec_downloaded_file"
+        when:
+          event_type_in: ["EXEC", "LOAD"]
+          object_has_label_any: ["O_FILE_DOWNLOADED"]
+    propagation_rules: []
+
+  B_EXEC_UPLOADED:
+    category: "behavior"
+    stage_mapping: "ExecutionStrong"
+    bridge_allowed: false
+    score: 24
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "exec_uploaded_file"
+        when:
+          event_type_in: ["EXEC", "LOAD"]
+          object_has_label_any: ["O_FILE_UPLOADED"]
+    propagation_rules: []
+
+  B_EXEC_SUSPECT_WRITTEN:
+    category: "behavior"
+    stage_mapping: "ExecutionStrong"
+    bridge_allowed: false
+    score: 28
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "exec_suspect_written"
+        when:
+          event_type_in: ["EXEC", "LOAD"]
+          object_has_label_any: ["O_SUSPECT_WRITTEN_EXECUTABLE"]
+    propagation_rules: []
+
+  B_SHELL_SPAWN:
+    category: "behavior"
+    stage_mapping: "ExecutionWeak"
+    bridge_allowed: false
+    score: 8
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "suspicious_shell_child"
+        when:
+          process_name_in_ref: "process_names.shells"
+          any:
+            - parent_has_label_any: ["P_WEB_CTX", "P_REMOTE_CTX", "P_SUSPECT_CTRL_CTX"]
+            - parent_process_name_in_ref: "process_names.web_services"
+            - process_cmdline_contains_any: [" -c ", "curl", "wget", "nc ", "socat", "/tmp/", "/dev/shm/"]
+            - process_executes_object_with_label_any: ["O_FILE_DOWNLOADED", "O_FILE_UPLOADED", "O_SUSPECT_WRITTEN_EXECUTABLE"]
+    propagation_rules: []
+
+  B_SCRIPT_EXEC:
+    category: "behavior"
+    stage_mapping: "ExecutionWeak"
+    bridge_allowed: false
+    score: 8
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "suspicious_interpreter"
+        when:
+          process_name_in_ref: "process_names.interpreters"
+          any:
+            - process_cmdline_contains_any: ["http://", "https://", "/tmp/", "/dev/shm/", "-c "]
+            - parent_has_label_any: ["P_WEB_CTX", "P_REMOTE_CTX", "P_SUSPECT_CTRL_CTX"]
+            - reads_or_executes_object_with_label_any: ["O_FILE_DOWNLOADED", "O_FILE_UPLOADED", "O_SUSPECT_WRITTEN_EXECUTABLE"]
+    propagation_rules: []
+
+  B_INTERPRETER_LAUNCH:
+    category: "behavior"
+    stage_mapping: "ExecutionWeak"
+    bridge_allowed: false
+    score: 6
+    confidence: "low"
+    ttl_minutes: null
+    init_rules:
+      - name: "interpreter_seen"
+        when:
+          process_name_in_ref: "process_names.interpreters"
+    propagation_rules: []
+
+  B_READ_CRED:
+    category: "behavior"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 15
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "read_credential_file"
+        when:
+          event_type_in: ["READ"]
+          object_class_in: ["credential_file"]
+    propagation_rules: []
+
+  B_READ_HISTORY:
+    category: "behavior"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 12
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "read_history_file"
+        when:
+          event_type_in: ["READ"]
+          object_class_in: ["history_file"]
+    propagation_rules: []
+
+  B_READ_BUSINESS:
+    category: "behavior"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 18
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "read_business_file"
+        when:
+          event_type_in: ["READ"]
+          object_class_in: ["business_file"]
+    propagation_rules: []
+
+  B_MASS_FILE_ACCESS:
+    category: "behavior"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 10
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "mass_file_access_window"
+        when:
+          within_minutes: 5
+          any:
+            - distinct_file_count_gte: 100
+            - total_read_bytes_gte: 104857600
+    propagation_rules: []
+
+  B_WRITE_PERSISTENCE:
+    category: "behavior"
+    stage_mapping: "FollowUp"
+    bridge_allowed: false
+    score: 30
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "write_persistence_file"
+        when:
+          event_type_in: ["WRITE", "CREATE", "RENAME"]
+          object_class_in: ["persistence_file"]
+    propagation_rules: []
+
+  B_WRITE_PRIV_CONFIG:
+    category: "behavior"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 30
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "modify_privilege_file"
+        when:
+          event_type_in: ["WRITE", "CHMOD", "CHOWN"]
+          object_class_in: ["privilege_file"]
+    propagation_rules: []
+
+  B_ARCHIVE_DATA:
+    category: "behavior"
+    stage_mapping: "FollowUp"
+    bridge_allowed: false
+    score: 18
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "archive_tool_or_file"
+        when:
+          any:
+            - process_name_in_ref: "process_names.archive_tools"
+            - object_class_in: ["archive_file"]
+    propagation_rules: []
+
+  B_DELETE_LOG:
+    category: "behavior"
+    stage_mapping: "FollowUp"
+    bridge_allowed: false
+    score: 25
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "modify_log_file"
+        when:
+          event_type_in: ["DELETE", "RENAME", "WRITE"]
+          object_class_in: ["log_file"]
+    propagation_rules: []
+
+  B_LATERAL_CONNECT:
+    category: "behavior"
+    stage_mapping: "FollowUp"
+    bridge_allowed: false
+    score: 20
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "connect_internal_lateral_port"
+        when:
+          event_type_in: ["CONNECT", "SEND"]
+          object_class_in: ["internal_ip"]
+          remote_port_in_ref: "network.lateral_ports"
+    propagation_rules: []
+
+  B_REMOTE_LOGIN_SERVICE:
+    category: "behavior"
+    stage_mapping: "Entry"
+    bridge_allowed: false
+    score: 5
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "remote_service_accept"
+        when:
+          process_name_in_ref: "process_names.remote_services"
+          event_type_in: ["ACCEPT", "RECV"]
+    propagation_rules: []
+
+  B_WEB_WRITE:
+    category: "behavior"
+    stage_mapping: "Entry"
+    bridge_allowed: false
+    score: 4
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "write_web_upload_path"
+        when:
+          event_type_in: ["WRITE", "CREATE"]
+          object_path_contains_any_ref: "paths.upload_markers"
+    propagation_rules: []
+
+  O_NET_EXTERNAL:
+    category: "object"
+    stage_mapping: "Entry"
+    bridge_allowed: false
+    score: 0
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "object_is_external_ip"
+        when:
+          object_class_in: ["external_ip"]
+    propagation_rules: []
+
+  O_FILE_TEMP:
+    category: "object"
+    stage_mapping: "ExecutionWeak"
+    bridge_allowed: true
+    score: 0
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "path_in_temp_dir"
+        when:
+          object_class_in: ["temp_file"]
+    propagation_rules: []
+
+  O_FILE_UPLOADED:
+    category: "object"
+    stage_mapping: "Entry"
+    bridge_allowed: true
+    score: 0
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "write_to_upload_path"
+        when:
+          event_type_in: ["WRITE", "CREATE"]
+          object_path_contains_any_ref: "paths.upload_markers"
+    propagation_rules: []
+
+  O_FILE_DOWNLOADED:
+    category: "object"
+    stage_mapping: "Entry"
+    bridge_allowed: true
+    score: 0
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "downloader_process_writes_file"
+        when:
+          process_name_in_ref: "process_names.downloaders"
+          process_has_external_connect_within_seconds: 120
+          event_type_in: ["WRITE", "CREATE"]
+          object_type_in: ["file"]
+      - name: "cmdline_url_write"
+        when:
+          process_cmdline_contains_any: ["http://", "https://", "ftp://", " -O ", " -o "]
+          event_type_in: ["WRITE", "CREATE"]
+      - name: "external_recv_then_temp_write"
+        when:
+          process_has_external_recv_within_seconds: 120
+          event_type_in: ["WRITE", "CREATE"]
+          object_class_in: ["temp_file"]
+    propagation_rules: []
+
+  O_FILE_WRITTEN_BY_NET_CONTEXT:
+    category: "object"
+    stage_mapping: "Entry"
+    bridge_allowed: false
+    score: 0
+    confidence: "low"
+    ttl_minutes: null
+    init_rules:
+      - name: "net_context_writes_file"
+        when:
+          process_has_label_any: ["P_NET_CTX", "P_UNTRUSTED_CTX"]
+          event_type_in: ["WRITE", "CREATE"]
+          object_type_in: ["file"]
+    propagation_rules: []
+
+  O_FILE_NONEXIST:
+    category: "object"
+    stage_mapping: "ExecutionWeak"
+    bridge_allowed: false
+    score: 0
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "missing_file_access"
+        when:
+          event_result_in: ["ENOENT", "NOT_FOUND"]
+          event_type_in: ["READ", "OPEN", "EXEC", "LOAD", "MMAP"]
+    propagation_rules: []
+
+  O_SUSPECT_WRITTEN_EXECUTABLE:
+    category: "object"
+    stage_mapping: "ExecutionStrong"
+    bridge_allowed: true
+    score: 0
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "written_then_exec_or_load"
+        when:
+          object_seen_write_before_exec_or_load: true
+          object_class_not_in: ["system_library", "system_resource"]
+    propagation_rules: []
+
+  O_CREDENTIAL:
+    category: "object"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 0
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "credential_path_match"
+        when:
+          object_class_in: ["credential_file"]
+    propagation_rules: []
+
+  O_HISTORY:
+    category: "object"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 0
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "history_path_match"
+        when:
+          object_class_in: ["history_file"]
+    propagation_rules: []
+
+  O_BUSINESS_DATA:
+    category: "object"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 0
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "business_path_match"
+        when:
+          object_class_in: ["business_file"]
+    propagation_rules: []
+
+  O_AUTH_CONFIG:
+    category: "object"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: false
+    score: 0
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "auth_config_path"
+        when:
+          object_class_in: ["auth_config_file"]
+    propagation_rules: []
+
+  O_PERSISTENCE:
+    category: "object"
+    stage_mapping: "FollowUp"
+    bridge_allowed: true
+    score: 0
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "persistence_path_match"
+        when:
+          object_class_in: ["persistence_file"]
+    propagation_rules: []
+
+  O_PRIV_CONFIG:
+    category: "object"
+    stage_mapping: "TargetAccess"
+    bridge_allowed: true
+    score: 0
+    confidence: "high"
+    ttl_minutes: null
+    init_rules:
+      - name: "privilege_path_match"
+        when:
+          object_class_in: ["privilege_file"]
+    propagation_rules: []
+
+  O_ARCHIVE:
+    category: "object"
+    stage_mapping: "FollowUp"
+    bridge_allowed: true
+    score: 0
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "archive_path_match"
+        when:
+          object_class_in: ["archive_file"]
+    propagation_rules: []
+
+  O_SECURITY_LOG:
+    category: "object"
+    stage_mapping: "FollowUp"
+    bridge_allowed: false
+    score: 0
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules:
+      - name: "log_path_match"
+        when:
+          object_class_in: ["log_file"]
+    propagation_rules: []
+
+  A_CHILD_SUSPICIOUS:
+    category: "aggregate"
+    stage_mapping: "None"
+    bridge_allowed: false
+    score: 5
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules: []
+    propagation_rules: []
+
+  A_BRIDGED_BY_SUSPICIOUS_OBJECT:
+    category: "aggregate"
+    stage_mapping: "None"
+    bridge_allowed: false
+    score: 8
+    confidence: "medium"
+    ttl_minutes: null
+    init_rules: []
+    propagation_rules: []
+
+dataset_overrides:
+  trace:
+    path_search:
+      max_total_span_minutes: 120
+  theia:
+    path_search:
+      max_total_span_minutes: 180
+  cadets:
+    path_search:
+      max_total_span_minutes: 240
+
+host_overrides: {}

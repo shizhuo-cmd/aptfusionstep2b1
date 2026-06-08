@@ -1,0 +1,13 @@
+C:\#1
+C:\Windows\#2
+C:\Windows\System32\#3
+C:\Windows\System32\config\#4
+C:\Windows\System32\drivers\#5
+C:\Windows\System32\wbem\#6
+C:\Windows\WinSxS\#7
+C:\Program Files\#8
+C:\Users\#9
+C:\Users\admin\#10
+C:\Program Files (x86)\#11
+C:\Program Files\#11
+C:\ProgramData\#12

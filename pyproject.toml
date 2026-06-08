@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apt-fusion"
+version = "0.1.0"
+description = "Provenance task-graph detection and investigation pipeline."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+  "numpy==1.26.4",
+  "pandas==2.2.3",
+  "scipy==1.11.4",
+  "scikit-learn==1.5.2",
+  "networkx==3.2.1",
+  "matplotlib==3.8.4",
+  "tqdm==4.67.1",
+  "pillow==10.2.0",
+  "ogb==1.3.6",
+  "SPARQLWrapper==2.0.0",
+  "outlier-utils==0.0.5",
+  "rich==13.9.4",
+  "openai==1.107.1",
+  "llama-index==0.14.0",
+  "llama-index-llms-ollama==0.7.2",
+  "llama-index-embeddings-ollama==0.8.3",
+  "llama-index-llms-deepseek==0.2.1",
+  "llama-index-embeddings-huggingface==0.6.1",
+  "pyyaml==6.0.2",
+  "requests==2.32.3",
+]
+
+[project.scripts]
+apt-fusion = "apt_fusion.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+apt_fusion = [
+  "resources/tapas/data/*.txt",
+  "resources/tapas/model/*.pt",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

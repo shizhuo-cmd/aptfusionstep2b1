@@ -1,0 +1,49 @@
+__pycache__/
+*.pyc
+.venv/
+artifacts/
+.pytest_cache/
+
+# Local temp and cache
+.tmp_*/
+.tmp_*
+.tmp_pytest/
+.tmp_test/
+pytest-cache-files-*/
+.vscode/
+
+# Top-level experiment artifacts
+artifacts_trace_*/
+
+# Runtime outputs: keep only the local README placeholder
+runtime/*
+!runtime/README_runtime.txt
+
+# ATT&CK STIX snapshot is treated as external data
+attack-stix/enterprise-attack.json
+
+# TAPAS release: keep only lightweight source files at the root
+TAPAS_release/*
+!TAPAS_release/*.py
+!TAPAS_release/*.txt
+
+# Generated TAPAS data/model directories
+TAPAS_release/data/
+TAPAS_release/dataset_temp/
+TAPAS_release/groundtruth/
+TAPAS_release/model/
+
+# Debug run artifacts and historical experiment snapshots
+debug/__pycache__/
+debug/mini_trace_case/
+debug/report_alignment/
+debug/tmp_gtseed_segmented_local/
+debug/_tmp_gt_align_test/
+debug/tmp_stats_model_stats.pkl
+
+# Local archive/sync bundles
+path_reason_sync_20260525.zip
+
+# Embedded model artifacts: keep code, exclude weights
+src/apt_fusion/resources/tapas/model/
+vendor/tapas/model/
