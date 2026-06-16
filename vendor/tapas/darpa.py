@@ -405,7 +405,13 @@ def encode_trace(sub_list, obj_list, event_list):
 
     return sub_list_hat
 
-def filters(data_path, return_task_components=False, child_threshold=2, split_mode="fanout"):
+def filters(
+        data_path,
+        return_task_components=False,
+        child_threshold=2,
+        split_mode="fanout",
+        count_segmented_children_upstream=False,
+):
     data_list=os.listdir(data_path)
     syspath = './data/linux_system_path.txt'
     filetypepath = './data/linux_file_type.txt'
@@ -574,8 +580,20 @@ def filters(data_path, return_task_components=False, child_threshold=2, split_mo
             chdict,
             child_threshold=child_threshold,
             split_mode=split_mode,
+            count_segmented_children_upstream=count_segmented_children_upstream,
         )
         task_components = _build_task_components(padict, chdict, segmented, split_mode=split_mode)
+        task_component_diagnostics = _build_task_component_diagnostics(
+            padict,
+            chdict,
+            task_components,
+            segmented,
+            child_threshold=child_threshold,
+            split_mode=split_mode,
+            count_segmented_children_upstream=count_segmented_children_upstream,
+        )
+    else:
+        task_component_diagnostics = []
 
     del tgiddict
     del subjswap
@@ -635,15 +653,24 @@ def filters(data_path, return_task_components=False, child_threshold=2, split_mo
             'segmented_nodes': sorted(segmented),
             'child_threshold': int(child_threshold),
             'split_mode': str(split_mode),
+            'count_segmented_children_upstream': bool(count_segmented_children_upstream),
+            'task_component_diagnostics': task_component_diagnostics,
         }, subjhisvec
     return chi_pa, subjhisvec
 
-def cut_task(subject_list, return_task_components=False, child_threshold=2, split_mode="fanout"):
+def cut_task(
+        subject_list,
+        return_task_components=False,
+        child_threshold=2,
+        split_mode="fanout",
+        count_segmented_children_upstream=False,
+):
     return _cut_task(
         subject_list,
         return_task_components=return_task_components,
         child_threshold=child_threshold,
         split_mode=split_mode,
+        count_segmented_children_upstream=count_segmented_children_upstream,
     )
 
 
@@ -699,7 +726,13 @@ def _normalize_task_maps(subject_list):
     return padict, chdict
 
 
-def _resolve_segmented_nodes(padict, chdict, child_threshold=2, split_mode="fanout"):
+def _resolve_segmented_nodes(
+        padict,
+        chdict,
+        child_threshold=2,
+        split_mode="fanout",
+        count_segmented_children_upstream=False,
+):
     if split_mode == "connected":
         return set()
     if split_mode != "fanout":
@@ -714,12 +747,51 @@ def _resolve_segmented_nodes(padict, chdict, child_threshold=2, split_mode="fano
         next_segmented = set()
         for node in candidate_nodes:
             children = padict.get(node, [])
-            effective_children = sum(1 for child in children if child not in segmented)
+            if count_segmented_children_upstream:
+                effective_children = len(children)
+            else:
+                effective_children = sum(1 for child in children if child not in segmented)
             if effective_children > child_threshold:
                 next_segmented.add(node)
         if next_segmented == segmented:
             return segmented
         segmented = next_segmented
+
+
+def _build_task_component_diagnostics(
+        padict,
+        chdict,
+        components,
+        segmented,
+        child_threshold=2,
+        split_mode="fanout",
+        count_segmented_children_upstream=False,
+):
+    diagnostics = []
+    segmented_nodes = set(segmented)
+    for component in components:
+        task_root = component.get('task_root')
+        children = list(padict.get(task_root, []))
+        if count_segmented_children_upstream:
+            effective_children = len(children)
+        else:
+            effective_children = sum(1 for child in children if child not in segmented_nodes)
+        diagnostics.append(
+            {
+                'task_root': task_root,
+                'task_size': len(component.get('nodes', [])),
+                'internal_edge_count': len(component.get('edges', [])),
+                'boundary_node_count': len(component.get('boundary_nodes', [])),
+                'task_root_total_children': len(children),
+                'task_root_effective_children': int(effective_children),
+                'task_root_segmented': bool(task_root in segmented_nodes),
+                'task_root_parent_missing': chdict.get(task_root) in (None, 'Unknow'),
+                'child_threshold': int(child_threshold),
+                'split_mode': str(split_mode),
+                'count_segmented_children_upstream': bool(count_segmented_children_upstream),
+            }
+        )
+    return diagnostics
 
 
 def _build_task_components(padict, chdict, segmented, split_mode="fanout"):
@@ -781,11 +853,15 @@ def _build_task_components(padict, chdict, segmented, split_mode="fanout"):
     )
     task_roots = []
     seen_roots = set()
-    for node in roots + sorted(segmented):
+    for node in roots:
         if node in seen_roots:
             continue
         seen_roots.add(node)
         task_roots.append(node)
+    for node in sorted(segmented):
+        if node not in seen_roots:
+            seen_roots.add(node)
+            task_roots.append(node)
 
     components = []
 
@@ -833,15 +909,31 @@ def _build_task_components(padict, chdict, segmented, split_mode="fanout"):
     return components
 
 
-def _cut_task(subject_list, return_task_components=False, child_threshold=2, split_mode="fanout"):
+def _cut_task(
+        subject_list,
+        return_task_components=False,
+        child_threshold=2,
+        split_mode="fanout",
+        count_segmented_children_upstream=False,
+):
     padict, chdict = _normalize_task_maps(subject_list)
     segmented = _resolve_segmented_nodes(
         padict,
         chdict,
         child_threshold=child_threshold,
         split_mode=split_mode,
+        count_segmented_children_upstream=count_segmented_children_upstream,
     )
     components = _build_task_components(padict, chdict, segmented, split_mode=split_mode)
+    task_component_diagnostics = _build_task_component_diagnostics(
+        padict,
+        chdict,
+        components,
+        segmented,
+        child_threshold=child_threshold,
+        split_mode=split_mode,
+        count_segmented_children_upstream=count_segmented_children_upstream,
+    )
 
     edge_seen = set()
     chi_pa = []
@@ -859,6 +951,8 @@ def _cut_task(subject_list, return_task_components=False, child_threshold=2, spl
             'segmented_nodes': sorted(segmented),
             'child_threshold': int(child_threshold),
             'split_mode': str(split_mode),
+            'count_segmented_children_upstream': bool(count_segmented_children_upstream),
+            'task_component_diagnostics': task_component_diagnostics,
         }
     return chi_pa
 
@@ -1132,14 +1226,16 @@ def dataenhance(x, addnum, onedataname):
     return addx
 
 
-def data_deal(data_list, onedataname):
+def data_deal(data_list, onedataname, divisor=2000, bonus=0):
     data_pro = []
     atttack_num = 0
     count = len(data_list)
     for x in data_list:
         if x['label'] == 1:
-            # needadd = count//600
-            needadd = count // 2000
+            if divisor <= 0:
+                needadd = 0
+            else:
+                needadd = max(0, (count // divisor) + bonus)
             atttack_num += needadd
             data_pro.append(x)
             addx = dataenhance(x['nodes'], needadd, onedataname)

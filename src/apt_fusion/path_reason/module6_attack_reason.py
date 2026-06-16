@@ -127,6 +127,22 @@ def _claim_attack_priors_enabled(cfg: FusionConfig) -> bool:
     return str(getattr(cfg, "claim_attack_prior_mode", "full")).strip().lower() != "disabled"
 
 
+def _attack_mapping_scope(cfg: FusionConfig) -> str:
+    return str(getattr(cfg, "attack_mapping_scope", "full")).strip().lower() or "full"
+
+
+def _tactic_mapping_mode(cfg: FusionConfig) -> str:
+    return str(getattr(cfg, "tactic_mapping_mode", "llm")).strip().lower() or "llm"
+
+
+def _tactics_only_enabled(cfg: FusionConfig) -> bool:
+    return _attack_mapping_scope(cfg) == "tactics_only"
+
+
+def _deterministic_tactic_mapping_enabled(cfg: FusionConfig) -> bool:
+    return _tactics_only_enabled(cfg) and _tactic_mapping_mode(cfg) == "deterministic"
+
+
 def _system_prompt() -> str:
     return (
         "You are an advanced persistent threat analyst. Use only the supplied candidate attack path dossier. "
@@ -193,6 +209,15 @@ def _csv(values: list[str], limit: int | None = None) -> str:
     if limit is not None:
         items = items[:limit]
     return ",".join(items)
+
+
+def _sorted_unique(values: list[str]) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in output:
+            output.append(text)
+    return output
 
 
 def _compact_process_line(process: dict[str, Any]) -> str:
@@ -269,6 +294,13 @@ def _render_compact_path_dossier(dossier: dict[str, Any]) -> str:
     chain_kind = str(dossier.get("chain_kind", "")).strip()
     if chain_kind:
         support_lines.append(f"- chain_kind={chain_kind}")
+    family_tags = [
+        str(value).strip()
+        for value in dossier.get("family_tags", []) or []
+        if str(value).strip()
+    ]
+    if family_tags:
+        support_lines.append(f"- family_tags={_csv(family_tags, limit=8)}")
     context_ids = [
         str(value).strip()
         for value in dossier.get("context_ids", []) or []
@@ -302,6 +334,30 @@ def _render_compact_path_dossier(dossier: dict[str, Any]) -> str:
     if support_lines:
         lines.append("SUPPORT")
         lines.extend(support_lines)
+    precursor_event_ids = [
+        str(value).strip()
+        for value in dossier.get("precursor_event_ids", []) or []
+        if str(value).strip()
+    ]
+    if precursor_event_ids:
+        lines.append("PRECURSOR")
+        lines.append(f"- events={_csv(precursor_event_ids, limit=10)}")
+    followup_event_ids = [
+        str(value).strip()
+        for value in dossier.get("followup_event_ids", []) or []
+        if str(value).strip()
+    ]
+    if followup_event_ids:
+        lines.append("FOLLOWUP")
+        lines.append(f"- events={_csv(followup_event_ids, limit=10)}")
+    network_support_summary = _truncate_text(str(dossier.get("network_support_summary", "")).strip(), 180)
+    if network_support_summary:
+        lines.append("NETWORK_SUPPORT")
+        lines.append(f"- {network_support_summary}")
+    object_lineage_summary = _truncate_text(str(dossier.get("object_lineage_summary", "")).strip(), 180)
+    if object_lineage_summary:
+        lines.append("OBJECT_LINEAGE")
+        lines.append(f"- {object_lineage_summary}")
     lines.append("PROCESSES")
     processes = dossier.get("core_processes", []) or []
     if processes:
@@ -331,6 +387,15 @@ def _render_compact_path_dossier(dossier: dict[str, Any]) -> str:
         lines.append("WARNINGS")
         for warning in warnings[:8]:
             lines.append(f"- {_truncate_text(warning, 144)}")
+    missed_truth_like_hints = [
+        str(value).strip()
+        for value in dossier.get("missed_truth_like_hints", []) or []
+        if str(value).strip()
+    ]
+    if missed_truth_like_hints:
+        lines.append("FAMILY_GAPS")
+        for hint in missed_truth_like_hints[:8]:
+            lines.append(f"- {_truncate_text(hint, 144)}")
     return "\n".join(lines).strip()
 
 
@@ -375,6 +440,8 @@ def _compact_candidate_line(item: dict[str, Any]) -> str:
 
 
 def _render_compact_mapping_context(context: dict[str, Any]) -> str:
+    attack_mapping_scope = str(context.get("attack_mapping_scope", "full")).strip().lower() or "full"
+    tactics_only = attack_mapping_scope == "tactics_only"
     lines = [_render_compact_path_dossier(context.get("path_dossier", {}))]
     claim_graph = context.get("claim_graph", {}) or {}
     lines.append("CLAIMS")
@@ -455,13 +522,14 @@ def _render_compact_mapping_context(context: dict[str, Any]) -> str:
             lines.append(f"- {_compact_candidate_line(item)}")
     else:
         lines.append("- none")
-    lines.append("TECHNIQUE_CANDIDATES")
-    techniques = [item for item in attack_candidates.get("techniques", []) if isinstance(item, dict)]
-    if techniques:
-        for item in techniques[:14]:
-            lines.append(f"- {_compact_candidate_line(item)}")
-    else:
-        lines.append("- none")
+    if not tactics_only:
+        lines.append("TECHNIQUE_CANDIDATES")
+        techniques = [item for item in attack_candidates.get("techniques", []) if isinstance(item, dict)]
+        if techniques:
+            for item in techniques[:14]:
+                lines.append(f"- {_compact_candidate_line(item)}")
+        else:
+            lines.append("- none")
     return "\n".join(line for line in lines if line.strip()).strip()
 
 
@@ -497,15 +565,21 @@ def _user_prompt_map(
     *,
     include_claim_attack_hints: bool = True,
 ) -> str:
+    attack_mapping_scope = str(context.get("attack_mapping_scope", "full")).strip().lower() or "full"
+    tactics_only = attack_mapping_scope == "tactics_only"
     rules = [
         "- Use only the provided claims, timeline, and ATT&CK candidates.",
         "- Treat the claims as pre-matched Holmes-style TTP atoms and preserve their causal ordering.",
         "- Map each claim independently and do not reuse a technique from one behavior type for an unrelated claim.",
         "- Choose only from the provided ATT&CK candidate IDs and names.",
-        "- Choose the best-supported tactic first, then technique.",
-        "- If tactic support exists but technique support is weak, leave technique empty.",
+        "- Choose the best-supported tactic first.",
         "- Prefer ATT&CK IDs from the candidate list when possible.",
     ]
+    if tactics_only:
+        rules.append("- This run is tactic-only: leave technique_id and technique empty for every mapping.")
+    else:
+        rules.append("- Then choose the best-supported technique.")
+        rules.append("- If tactic support exists but technique support is weak, leave technique empty.")
     if include_claim_attack_hints:
         rules.append("- Treat claim_attack_hints as soft priors that reflect behavior semantics, not as proof by themselves.")
     rules.extend(
@@ -970,6 +1044,116 @@ def _augment_attack_candidates_with_behavior_priors(
     }
 
 
+def _filter_attack_candidates_for_scope(cfg: FusionConfig, attack_candidates: dict[str, Any]) -> dict[str, Any]:
+    if not _tactics_only_enabled(cfg):
+        return attack_candidates
+    return {
+        **attack_candidates,
+        "techniques": [],
+    }
+
+
+def _deterministic_tactic_mappings(
+    cfg: FusionConfig,
+    claims: list[dict[str, Any]],
+    attack_candidates: dict[str, Any],
+) -> list[dict[str, Any]]:
+    tactic_by_id = {
+        str(item.get("external_id", "")).strip().upper(): item
+        for item in attack_candidates.get("tactics", []) or []
+        if isinstance(item, dict) and str(item.get("external_id", "")).strip()
+    }
+    mappings: list[dict[str, Any]] = []
+    for claim in claims:
+        claim_id = str(claim.get("claim_id", "")).strip()
+        behavior = str(claim.get("behavior_type", "")).strip().lower()
+        if not claim_id or not behavior:
+            continue
+        tactic_ids = list(HOLMES_TTP_CATALOG.get(behavior, {}).get("tactic_ids", ()) or ())
+        if not tactic_ids:
+            preferred_tactic_id = str(_PATH_BEHAVIOR_ALIGNMENT_PRIORS.get(behavior, {}).get("tactic_id", "")).strip().upper()
+            if preferred_tactic_id:
+                tactic_ids = [preferred_tactic_id]
+        for tactic_id in _sorted_unique([str(value).strip().upper() for value in tactic_ids if str(value).strip()]):
+            tactic_choice = tactic_by_id.get(tactic_id, {"external_id": tactic_id, "name": _TACTIC_NAME_BY_ID.get(tactic_id, "")})
+            mappings.append(
+                {
+                    "tactic_id": str(tactic_choice.get("external_id", "")).strip().upper(),
+                    "tactic": str(tactic_choice.get("name", "")).strip() or _TACTIC_NAME_BY_ID.get(tactic_id, ""),
+                    "technique_id": "",
+                    "technique": "",
+                    "evidence_claim_ids": [claim_id],
+                    "confidence": max(0.72, _clip_confidence(claim.get("confidence"))),
+                    "gaps": [],
+                }
+            )
+    dedup: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+    for item in mappings:
+        key = (
+            str(item.get("tactic_id", "")).strip().upper(),
+            tuple(sorted(str(value).strip() for value in item.get("evidence_claim_ids", []) if str(value).strip())),
+        )
+        if key not in dedup or float(item.get("confidence", 0.0) or 0.0) > float(dedup[key].get("confidence", 0.0) or 0.0):
+            dedup[key] = item
+    return list(dedup.values())
+
+
+def _empty_mapping_validation_summary() -> dict[str, Any]:
+    return {
+        "raw_mapping_count": 0,
+        "kept_mapping_count": 0,
+        "raw_evidence_id_count": 0,
+        "raw_claim_id_ref_count": 0,
+        "raw_event_id_ref_count": 0,
+        "raw_unknown_id_ref_count": 0,
+        "mappings_with_claim_id_refs_count": 0,
+        "mappings_with_event_id_refs_count": 0,
+        "mappings_with_unknown_id_refs_count": 0,
+        "normalized_event_id_claim_ref_count": 0,
+        "mappings_normalized_to_empty_count": 0,
+        "mappings_dropped_after_claim_support_filter_count": 0,
+    }
+
+
+def _normalize_mapping_evidence_claim_ids(
+    raw_values: Any,
+    *,
+    claim_ids: set[str],
+    event_id_to_claim_ids: dict[str, list[str]],
+) -> tuple[list[str], dict[str, Any]]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    detail = {
+        "raw_value_count": 0,
+        "raw_claim_id_ref_count": 0,
+        "raw_event_id_ref_count": 0,
+        "raw_unknown_id_ref_count": 0,
+        "normalized_event_id_claim_ref_count": 0,
+    }
+    for value in raw_values or []:
+        text = str(value).strip()
+        if not text:
+            continue
+        detail["raw_value_count"] += 1
+        if text in claim_ids:
+            detail["raw_claim_id_ref_count"] += 1
+            if text not in seen:
+                normalized.append(text)
+                seen.add(text)
+            continue
+        mapped_claim_ids = event_id_to_claim_ids.get(text, [])
+        if mapped_claim_ids:
+            detail["raw_event_id_ref_count"] += 1
+            for claim_id in mapped_claim_ids:
+                if claim_id not in seen:
+                    normalized.append(claim_id)
+                    seen.add(claim_id)
+                    detail["normalized_event_id_claim_ref_count"] += 1
+            continue
+        detail["raw_unknown_id_ref_count"] += 1
+    return normalized, detail
+
+
 def _claim_supports_mapping(
     dossier: dict[str, Any],
     claim: dict[str, Any],
@@ -1007,7 +1191,8 @@ def _validate_mappings(
     raw_mappings: list[dict[str, Any]],
     attack_candidates: dict[str, Any],
     claims: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    tactics_only = _tactics_only_enabled(cfg)
     claim_by_id = {
         str(item.get("claim_id", "")).strip(): item
         for item in claims
@@ -1018,6 +1203,20 @@ def _validate_mappings(
         for item in claims
         if isinstance(item, dict) and str(item.get("claim_id", "")).strip()
     }
+    event_id_to_claim_ids: dict[str, list[str]] = {}
+    for item in claims:
+        if not isinstance(item, dict):
+            continue
+        claim_id = str(item.get("claim_id", "")).strip()
+        if not claim_id:
+            continue
+        for value in item.get("evidence_event_ids", []) or []:
+            event_id = str(value).strip()
+            if not event_id:
+                continue
+            refs = event_id_to_claim_ids.setdefault(event_id, [])
+            if claim_id not in refs:
+                refs.append(claim_id)
     candidate_tactics = [
         item for item in attack_candidates.get("tactics", []) if isinstance(item, dict)
     ]
@@ -1045,16 +1244,33 @@ def _validate_mappings(
         if str(item.get("name", "")).strip()
     }
     cleaned: list[dict[str, Any]] = []
+    validation_summary = _empty_mapping_validation_summary()
     enforce_behavior_priors = _claim_attack_priors_enabled(cfg)
     for item in raw_mappings:
         if not isinstance(item, dict):
             continue
-        evidence_claim_ids = [
-            str(value).strip()
-            for value in item.get("evidence_claim_ids", [])
-            if str(value).strip() and str(value).strip() in claim_ids
-        ]
+        validation_summary["raw_mapping_count"] += 1
+        evidence_claim_ids, normalization_detail = _normalize_mapping_evidence_claim_ids(
+            item.get("evidence_claim_ids", []),
+            claim_ids=claim_ids,
+            event_id_to_claim_ids=event_id_to_claim_ids,
+        )
+        validation_summary["raw_evidence_id_count"] += int(normalization_detail["raw_value_count"])
+        validation_summary["raw_claim_id_ref_count"] += int(normalization_detail["raw_claim_id_ref_count"])
+        validation_summary["raw_event_id_ref_count"] += int(normalization_detail["raw_event_id_ref_count"])
+        validation_summary["raw_unknown_id_ref_count"] += int(normalization_detail["raw_unknown_id_ref_count"])
+        validation_summary["normalized_event_id_claim_ref_count"] += int(
+            normalization_detail["normalized_event_id_claim_ref_count"]
+        )
+        if int(normalization_detail["raw_claim_id_ref_count"]) > 0:
+            validation_summary["mappings_with_claim_id_refs_count"] += 1
+        if int(normalization_detail["raw_event_id_ref_count"]) > 0:
+            validation_summary["mappings_with_event_id_refs_count"] += 1
+        if int(normalization_detail["raw_unknown_id_ref_count"]) > 0:
+            validation_summary["mappings_with_unknown_id_refs_count"] += 1
         if not evidence_claim_ids:
+            if int(normalization_detail["raw_value_count"]) > 0:
+                validation_summary["mappings_normalized_to_empty_count"] += 1
             continue
         tactic_id = str(item.get("tactic_id", "")).strip().upper()
         tactic_name = str(item.get("tactic", "")).strip()
@@ -1085,15 +1301,17 @@ def _validate_mappings(
                     tactic_choice = tactic_by_name.get(_normalize_attack_name(str(tactic_label)))
                     if tactic_choice is not None:
                         break
+        if tactics_only:
+            technique_choice = None
+            technique_id = ""
+            technique_name = ""
         if tactic_choice is None and technique_choice is None:
             continue
-        tactic = resolve_tactic_name(cfg, str(tactic_choice.get("name", "")).strip()) if tactic_choice else None
-        technique = (
-            resolve_technique_name(cfg, str(technique_choice.get("name", "")).strip())
-            if technique_choice
-            else None
-        )
+        tactic = None
+        technique = None
         if tactic_choice is not None and technique_choice is not None:
+            tactic = resolve_tactic_name(cfg, str(tactic_choice.get("name", "")).strip())
+            technique = resolve_technique_name(cfg, str(technique_choice.get("name", "")).strip())
             technique_tactic_ids = {
                 str(value).strip().upper()
                 for value in technique_choice.get("tactic_ids", []) or []
@@ -1115,18 +1333,20 @@ def _validate_mappings(
             )
         ]
         if not filtered_claim_ids:
+            validation_summary["mappings_dropped_after_claim_support_filter_count"] += 1
             continue
         cleaned.append(
             {
                 "tactic_id": str((tactic_choice or {}).get("external_id", "")).strip().upper(),
                 "tactic": str((tactic_choice or {}).get("name", "")).strip() or (tactic.name if tactic else ""),
-                "technique_id": str((technique_choice or {}).get("external_id", "")).strip().upper(),
-                "technique": str((technique_choice or {}).get("name", "")).strip() or (technique.name if technique else ""),
+                "technique_id": "" if tactics_only else str((technique_choice or {}).get("external_id", "")).strip().upper(),
+                "technique": "" if tactics_only else (str((technique_choice or {}).get("name", "")).strip() or (technique.name if technique else "")),
                 "evidence_claim_ids": filtered_claim_ids,
                 "confidence": _clip_confidence(item.get("confidence")),
                 "gaps": [str(value).strip() for value in item.get("gaps", []) if str(value).strip()],
             }
         )
+        validation_summary["kept_mapping_count"] += 1
     dedup: dict[tuple[str, str, tuple[str, ...]], dict[str, Any]] = {}
     for item in cleaned:
         key = (
@@ -1136,7 +1356,8 @@ def _validate_mappings(
         )
         if key not in dedup or float(item["confidence"]) > float(dedup[key]["confidence"]):
             dedup[key] = item
-    return list(dedup.values())
+    validation_summary["kept_mapping_count"] = len(dedup)
+    return list(dedup.values()), validation_summary
 
 
 def _clip_confidence(value: Any) -> float:
@@ -1389,21 +1610,38 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
                 claim_attack_hints = _behavior_prior_hints_for_claims(cfg, dossier, claims)
             else:
                 claim_attack_hints = []
+            attack_candidates = _filter_attack_candidates_for_scope(cfg, attack_candidates)
             mapping_context = {
                 "path_dossier": dossier,
                 "claims": claims,
                 "claim_graph": claim_graph,
                 "claim_attack_hints": claim_attack_hints,
                 "attack_candidates": attack_candidates,
+                "attack_mapping_scope": _attack_mapping_scope(cfg),
             }
             mapping_system_prompt = _system_prompt()
-            mapping_user_prompt = _user_prompt_map(
-                mapping_context,
-                include_claim_attack_hints=_claim_attack_priors_enabled(cfg),
-            )
-            raw_mapping = _call_ollama_json(cfg, mapping_system_prompt, mapping_user_prompt)
-            mappings = _validate_mappings(cfg, dossier, list(raw_mapping.get("attack_mappings", [])), attack_candidates, claims)
-            mappings = _apply_behavior_prior_mappings(cfg, dossier, claims, attack_candidates, mappings)
+            mapping_user_prompt = ""
+            if _deterministic_tactic_mapping_enabled(cfg):
+                raw_mapping = {
+                    "attack_mappings": [],
+                    "gaps": ["deterministic tactic mapping derived from Holmes-style claims"],
+                }
+                mappings = _deterministic_tactic_mappings(cfg, claims, attack_candidates)
+                mapping_validation_summary = _empty_mapping_validation_summary()
+            else:
+                mapping_user_prompt = _user_prompt_map(
+                    mapping_context,
+                    include_claim_attack_hints=_claim_attack_priors_enabled(cfg),
+                )
+                raw_mapping = _call_ollama_json(cfg, mapping_system_prompt, mapping_user_prompt)
+                mappings, mapping_validation_summary = _validate_mappings(
+                    cfg,
+                    dossier,
+                    list(raw_mapping.get("attack_mappings", [])),
+                    attack_candidates,
+                    claims,
+                )
+                mappings = _apply_behavior_prior_mappings(cfg, dossier, claims, attack_candidates, mappings)
             report = {
                 "task_id": task_id,
                 "path_id": path_id,
@@ -1411,6 +1649,7 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
                 "risk_level": dossier.get("risk_level", ""),
                 "risk_score": dossier.get("risk_score", 0.0),
                 "stage_coverage": dossier.get("stage_coverage", []),
+                "family_tags": dossier.get("family_tags", []),
                 "summary": str(raw_extract.get("summary", "")).strip() or str(dossier.get("summary", "")).strip(),
                 "claims": claims,
                 "claim_graph": claim_graph,
@@ -1418,6 +1657,9 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
                 "iocs": iocs,
                 "attack_candidates": attack_candidates,
                 "attack_mappings": mappings,
+                "attack_mapping_scope": _attack_mapping_scope(cfg),
+                "tactic_mapping_mode": _tactic_mapping_mode(cfg),
+                "mapping_validation_summary": mapping_validation_summary,
                 "gaps": [
                     *[str(value).strip() for value in raw_extract.get("gaps", []) if str(value).strip()],
                     *[str(value).strip() for value in raw_mapping.get("gaps", []) if str(value).strip()],
@@ -1443,6 +1685,7 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
                     response=raw_mapping,
                 ),
             }
+            llm_inputs["mapping"]["validation_summary"] = mapping_validation_summary
             slug = _slugify(path_id)
             dossier_path = _dossiers_dir(cfg) / f"{slug}.json"
             report_path = _reports_dir(cfg) / f"{slug}.report.json"
@@ -1474,6 +1717,8 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
         {
             "report_count": report_count,
             "claim_attack_prior_mode": cfg.claim_attack_prior_mode,
+            "attack_mapping_scope": _attack_mapping_scope(cfg),
+            "tactic_mapping_mode": _tactic_mapping_mode(cfg),
             "candidate_file_count": len(candidate_files),
             "reports_dir": str(_reports_dir(cfg)),
             "dossiers_dir": str(_dossiers_dir(cfg)),

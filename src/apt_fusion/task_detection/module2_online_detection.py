@@ -80,6 +80,30 @@ def _edge_rows_for_graph(graph: dict[str, Any], process_ids: list[str]) -> list[
     return rows
 
 
+def _task_root_leaf_ids(
+    process_ids: list[str],
+    local_edges: list[dict[str, str]],
+) -> tuple[list[str], list[str], dict[str, int], dict[str, int], dict[str, set[str]]]:
+    # TAPAS task edges are exported as child -> parent.
+    indegree = {pid: 0 for pid in process_ids}
+    outdegree = {pid: 0 for pid in process_ids}
+    neighbors = {pid: set() for pid in process_ids}
+
+    for edge in local_edges:
+        src = edge["src"]
+        dst = edge["dst"]
+        outdegree[src] = outdegree.get(src, 0) + 1
+        indegree[dst] = indegree.get(dst, 0) + 1
+        neighbors.setdefault(src, set()).add(dst)
+        neighbors.setdefault(dst, set()).add(src)
+
+    # With child -> parent edges, a task root has no outgoing parent edge.
+    root_process_ids = sorted([pid for pid in process_ids if outdegree.get(pid, 0) == 0])
+    # Leaves have no incoming child edges.
+    leaf_process_ids = sorted([pid for pid in process_ids if indegree.get(pid, 0) == 0])
+    return root_process_ids, leaf_process_ids, indegree, outdegree, neighbors
+
+
 def _base_task_id(task_id: str) -> str:
     if "_aug" not in task_id:
         return task_id
@@ -135,20 +159,10 @@ def _task_graph_sidecars(task_rows: List[dict], module1_dir: Path) -> tuple[list
         graph, meta = pair
         process_ids = [str(pid) for pid in meta.get("node_ids", [])]
         local_edges = _edge_rows_for_graph(graph, process_ids)
-        indegree = {pid: 0 for pid in process_ids}
-        outdegree = {pid: 0 for pid in process_ids}
-        neighbors = {pid: set() for pid in process_ids}
-
-        for edge in local_edges:
-            src = edge["src"]
-            dst = edge["dst"]
-            outdegree[src] = outdegree.get(src, 0) + 1
-            indegree[dst] = indegree.get(dst, 0) + 1
-            neighbors.setdefault(src, set()).add(dst)
-            neighbors.setdefault(dst, set()).add(src)
-
-        root_process_ids = sorted([pid for pid in process_ids if indegree.get(pid, 0) == 0])
-        leaf_process_ids = sorted([pid for pid in process_ids if outdegree.get(pid, 0) == 0])
+        root_process_ids, leaf_process_ids, indegree, outdegree, neighbors = _task_root_leaf_ids(
+            process_ids,
+            local_edges,
+        )
         degree = {pid: indegree.get(pid, 0) + outdegree.get(pid, 0) for pid in process_ids}
         bridge_degree = {pid: len(neighbors.get(pid, set())) for pid in process_ids}
 

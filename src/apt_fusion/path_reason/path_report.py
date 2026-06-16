@@ -139,6 +139,13 @@ def build_path_dossier(
         "support_event_ids": list(path.support_event_ids),
         "support_object_keys": list(path.support_object_keys),
         "support_relations": list(path.support_relations),
+        "family_tags": list(path.family_tags),
+        "precursor_event_ids": list(path.precursor_event_ids),
+        "followup_event_ids": list(path.followup_event_ids),
+        "network_support_summary": path.network_support_summary,
+        "object_lineage_summary": path.object_lineage_summary,
+        "holmes_matched_atoms": list(path.holmes_matched_atoms),
+        "missed_truth_like_hints": list(path.missed_truth_like_hints),
         "process_envelope_time_range": {
             "start": path.time_range[0].isoformat() if path.time_range[0] is not None else None,
             "end": path.time_range[1].isoformat() if path.time_range[1] is not None else None,
@@ -208,12 +215,36 @@ def render_candidate_path_markdown(dossier: dict[str, Any]) -> str:
         lines.extend(["", "## Support"])
         if dossier.get("chain_kind"):
             lines.append(f"- chain_kind: `{dossier.get('chain_kind', '')}`")
+        family_tags = dossier.get("family_tags", [])
+        if family_tags:
+            lines.append(f"- family_tags: `{', '.join(family_tags)}`")
         context_ids = dossier.get("context_ids", [])
         if context_ids:
             lines.append(f"- context_ids: `{', '.join(context_ids)}`")
         support_object_keys = dossier.get("support_object_keys", [])
         if support_object_keys:
             lines.append(f"- support_object_keys: `{', '.join(support_object_keys)}`")
+        holmes_matched_atoms = dossier.get("holmes_matched_atoms", [])
+        if holmes_matched_atoms:
+            lines.append(f"- holmes_matched_atoms: `{', '.join(holmes_matched_atoms)}`")
+    precursor_event_ids = dossier.get("precursor_event_ids", [])
+    if precursor_event_ids:
+        lines.extend(["", "## PRECURSOR", f"- event_ids: `{', '.join(precursor_event_ids)}`"])
+    followup_event_ids = dossier.get("followup_event_ids", [])
+    if followup_event_ids:
+        lines.extend(["", "## FOLLOWUP", f"- event_ids: `{', '.join(followup_event_ids)}`"])
+    network_support_summary = str(dossier.get("network_support_summary", "")).strip()
+    if network_support_summary:
+        lines.extend(["", "## NETWORK_SUPPORT", f"- {network_support_summary}"])
+    object_lineage_summary = str(dossier.get("object_lineage_summary", "")).strip()
+    if object_lineage_summary:
+        lines.extend(["", "## OBJECT_LINEAGE", f"- {object_lineage_summary}"])
+    missed_truth_like_hints = dossier.get("missed_truth_like_hints", [])
+    if missed_truth_like_hints:
+        lines.extend(["", "## FAMILY_GAPS"])
+        for hint in missed_truth_like_hints:
+            lines.append(f"- {hint}")
+    if support_present:
         support_relations = dossier.get("support_relations", [])
         if support_relations:
             lines.append("- support_relations:")

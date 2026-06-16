@@ -21,6 +21,7 @@ class FusionConfig:
     ocr_inv_exp_name: str
     use_sequence_embeddings: bool = True
     use_ocr_stat_features: bool = True
+    graphsage_append_ocr_stat_features: bool = False
     ocr_stat_active_threshold_sec: float = 1.0
     task_graph_stat_late_fusion_enabled: bool = False
     task_graph_stat_fusion_weight: float = 0.25
@@ -69,6 +70,7 @@ class FusionConfig:
     module3_task_selection_mode: str = "predicted_positive"
     task_component_split_mode: str = "fanout"
     task_component_child_threshold: int = 2
+    task_component_count_segmented_children_upstream: bool = False
     attack_kb_stix_path: Path | None = None
     attack_kb_candidate_limit: int = 12
     attack_kb_embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -103,6 +105,8 @@ class FusionConfig:
     reason_max_bridge_edges_per_path: int = 8
     reason_max_objects_per_path: int = 12
     claim_attack_prior_mode: str = "full"
+    attack_mapping_scope: str = "full"
+    tactic_mapping_mode: str = "llm"
     path_reason_rules_path: Path | None = None
 
     @property
@@ -159,6 +163,7 @@ def load_config(path: str | Path) -> FusionConfig:
         ocr_inv_exp_name=str(data["ocr_inv_exp_name"]),
         use_sequence_embeddings=bool(_get(data, "use_sequence_embeddings", True)),
         use_ocr_stat_features=bool(_get(data, "use_ocr_stat_features", True)),
+        graphsage_append_ocr_stat_features=bool(_get(data, "graphsage_append_ocr_stat_features", False)),
         ocr_stat_active_threshold_sec=float(_get(data, "ocr_stat_active_threshold_sec", 1.0)),
         task_graph_stat_late_fusion_enabled=bool(_get(data, "task_graph_stat_late_fusion_enabled", False)),
         task_graph_stat_fusion_weight=float(_get(data, "task_graph_stat_fusion_weight", 0.25)),
@@ -209,6 +214,9 @@ def load_config(path: str | Path) -> FusionConfig:
         module3_task_selection_mode=str(_get(data, "module3_task_selection_mode", "predicted_positive")),
         task_component_split_mode=str(_get(data, "task_component_split_mode", "fanout")),
         task_component_child_threshold=int(_get(data, "task_component_child_threshold", 2)),
+        task_component_count_segmented_children_upstream=bool(
+            _get(data, "task_component_count_segmented_children_upstream", False)
+        ),
         attack_kb_stix_path=_optional_path(_get(data, "attack_kb_stix_path", "")),
         attack_kb_candidate_limit=int(_get(data, "attack_kb_candidate_limit", 12)),
         attack_kb_embedding_model_name=str(
@@ -249,6 +257,8 @@ def load_config(path: str | Path) -> FusionConfig:
         reason_max_bridge_edges_per_path=int(_get(data, "reason_max_bridge_edges_per_path", 8)),
         reason_max_objects_per_path=int(_get(data, "reason_max_objects_per_path", 12)),
         claim_attack_prior_mode=str(_get(data, "claim_attack_prior_mode", "full")),
+        attack_mapping_scope=str(_get(data, "attack_mapping_scope", "full")),
+        tactic_mapping_mode=str(_get(data, "tactic_mapping_mode", "llm")),
         path_reason_rules_path=_optional_path(_get(data, "path_reason_rules_path", "")),
     )
     _validate(cfg)
@@ -365,6 +375,20 @@ def _validate(cfg: FusionConfig) -> None:
             f"{sorted(allowed_claim_attack_prior_modes)}"
         )
 
+    allowed_attack_mapping_scopes = {"full", "tactics_only"}
+    if cfg.attack_mapping_scope not in allowed_attack_mapping_scopes:
+        raise ValueError(
+            "attack_mapping_scope must be one of "
+            f"{sorted(allowed_attack_mapping_scopes)}"
+        )
+
+    allowed_tactic_mapping_modes = {"deterministic", "llm"}
+    if cfg.tactic_mapping_mode not in allowed_tactic_mapping_modes:
+        raise ValueError(
+            "tactic_mapping_mode must be one of "
+            f"{sorted(allowed_tactic_mapping_modes)}"
+        )
+
     allowed_pooling = {"mean", "max"}
     if cfg.task_classifier_pooling not in allowed_pooling:
         raise ValueError(f"task_classifier_pooling must be one of {sorted(allowed_pooling)}")
@@ -422,6 +446,9 @@ def _validate(cfg: FusionConfig) -> None:
 
     if cfg.task_component_child_threshold < 0:
         raise ValueError("task_component_child_threshold must be >= 0")
+
+    if cfg.graphsage_append_ocr_stat_features and not cfg.use_ocr_stat_features:
+        raise ValueError("graphsage_append_ocr_stat_features requires use_ocr_stat_features=true")
 
     if cfg.dataset_family in {"tc3", "optc"} and not cfg.use_sequence_embeddings and not cfg.use_ocr_stat_features:
         raise ValueError(

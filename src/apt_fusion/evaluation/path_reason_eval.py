@@ -96,8 +96,10 @@ class PredictedPath:
     stage_coverage: list[str]
     process_chain: list[str]
     bridge_objects: list[str]
+    candidate_tactics: list[str]
     predicted_tactics: list[str]
     predicted_techniques: list[str]
+    attack_mapping_scope: str
     warnings: list[str]
     candidate_paths_path: str
     report_path: str
@@ -114,8 +116,10 @@ class PredictedPath:
             "stage_coverage": list(self.stage_coverage),
             "process_chain": list(self.process_chain),
             "bridge_objects": list(self.bridge_objects),
+            "candidate_tactics": list(self.candidate_tactics),
             "predicted_tactics": list(self.predicted_tactics),
             "predicted_techniques": list(self.predicted_techniques),
+            "attack_mapping_scope": self.attack_mapping_scope,
             "warnings": list(self.warnings),
             "candidate_paths_path": self.candidate_paths_path,
             "report_path": self.report_path,
@@ -747,6 +751,20 @@ def _report_mapping_sets(report: dict[str, Any]) -> tuple[list[str], list[str]]:
     return _sorted_unique(tactic_names), _sorted_unique(technique_ids)
 
 
+def _candidate_tactic_set(report: dict[str, Any]) -> list[str]:
+    tactic_names: list[str] = []
+    for item in report.get("attack_candidates", {}).get("tactics", []) or []:
+        if not isinstance(item, dict):
+            continue
+        tactic_id = _canonical_tactic_name(str(item.get("external_id", "")).strip())
+        tactic_name = _canonical_tactic_name(str(item.get("name", "")).strip())
+        if tactic_id:
+            tactic_names.append(tactic_id)
+        elif tactic_name:
+            tactic_names.append(tactic_name)
+    return _sorted_unique(tactic_names)
+
+
 def extract_predicted_paths(artifacts_dir: Path, host: str) -> list[PredictedPath]:
     candidate_dir = artifacts_dir / "module5_paths" / "candidate_paths"
     reports_dir = artifacts_dir / "module6_reason" / "reports"
@@ -784,6 +802,7 @@ def extract_predicted_paths(artifacts_dir: Path, host: str) -> list[PredictedPat
                 start_time, end_time = _time_range_from_dossier(dossier)
             report = report_by_path_id.get(path_id, {})
             predicted_tactics, predicted_techniques = _report_mapping_sets(report)
+            candidate_tactics = _candidate_tactic_set(report)
             predicted.append(
                 PredictedPath(
                     host=str(host).upper(),
@@ -800,8 +819,10 @@ def extract_predicted_paths(artifacts_dir: Path, host: str) -> list[PredictedPat
                         for edge in item.get("bridge_edges", []) or []
                         if isinstance(edge, dict)
                     ),
+                    candidate_tactics=candidate_tactics,
                     predicted_tactics=predicted_tactics,
                     predicted_techniques=predicted_techniques,
+                    attack_mapping_scope=str(report.get("attack_mapping_scope", "full")).strip().lower() or "full",
                     warnings=[str(value) for value in item.get("warnings", [])],
                     candidate_paths_path=str(path),
                     report_path=report_file_by_path_id.get(path_id, ""),
@@ -1016,7 +1037,7 @@ def evaluate_path_reason(
     match_top_n: int,
     pad_minutes: int,
     near_miss_minutes: int,
-) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     paths_by_host: dict[str, list[PredictedPath]] = {}
     for path in predicted_paths:
         paths_by_host.setdefault(path.host, []).append(path)
@@ -1033,6 +1054,8 @@ def evaluate_path_reason(
 
     window_level: list[dict[str, Any]] = []
     technique_comparison: list[dict[str, Any]] = []
+    tactic_comparison: list[dict[str, Any]] = []
+    candidate_tactic_coverage: list[dict[str, Any]] = []
     confirmed_hits = 0
     strict_hits = 0
     high_risk_hits = 0
@@ -1045,11 +1068,15 @@ def evaluate_path_reason(
     strict_recall_values: list[float] = []
     strict_precision_values: list[float] = []
     strict_tactic_recall_values: list[float] = []
+    strict_tactic_precision_values: list[float] = []
     broad_recall_values: list[float] = []
     full_coverage_count = 0
     technique_tp_total = 0
     technique_gt_total = 0
     technique_pred_total = 0
+    tactic_tp_total = 0
+    tactic_gt_total = 0
+    tactic_pred_total = 0
 
     for window in confirmed_windows:
         host_paths = paths_by_host.get(window.host, [])
@@ -1090,6 +1117,11 @@ def evaluate_path_reason(
             for path, _ in matched_top
             for tactic in path.predicted_tactics
         )
+        candidate_tactics = _sorted_unique(
+            tactic
+            for path, _ in matched_top
+            for tactic in path.candidate_tactics
+        )
         gt_techniques = list(window.confirmed_techniques)
         gt_tactics = list(window.confirmed_tactics)
         overlap_techniques = sorted(set(pred_techniques).intersection(gt_techniques))
@@ -1097,9 +1129,11 @@ def evaluate_path_reason(
         strict_recall = len(overlap_techniques) / max(1, len(gt_techniques))
         strict_precision = len(overlap_techniques) / max(1, len(pred_techniques))
         strict_tactic_recall = len(overlap_tactics) / max(1, len(gt_tactics))
+        strict_tactic_precision = len(overlap_tactics) / max(1, len(pred_tactics))
         strict_recall_values.append(strict_recall)
         if matched_top:
             strict_precision_values.append(strict_precision)
+            strict_tactic_precision_values.append(strict_tactic_precision)
         strict_tactic_recall_values.append(strict_tactic_recall)
         broad_gt = window.broad_techniques or gt_techniques
         broad_overlap = sorted(set(pred_techniques).intersection(broad_gt))
@@ -1110,6 +1144,9 @@ def evaluate_path_reason(
         technique_tp_total += len(overlap_techniques)
         technique_gt_total += len(gt_techniques)
         technique_pred_total += len(pred_techniques)
+        tactic_tp_total += len(overlap_tactics)
+        tactic_gt_total += len(gt_tactics)
+        tactic_pred_total += len(pred_tactics)
 
         best_path_id = ""
         best_match_type = ""
@@ -1131,7 +1168,8 @@ def evaluate_path_reason(
         warnings: list[str] = []
         if not matched_top:
             warnings.append("no primary-time matched path")
-        if not pred_techniques:
+        mapping_scope = matched_top[0][0].attack_mapping_scope if matched_top else (host_paths[0].attack_mapping_scope if host_paths else "full")
+        if mapping_scope != "tactics_only" and not pred_techniques:
             warnings.append("no ATT&CK technique emitted for top matched paths")
         window_level.append(
             {
@@ -1148,6 +1186,7 @@ def evaluate_path_reason(
                 "strict_technique_recall": strict_recall,
                 "strict_technique_precision": strict_precision if matched_top else 0.0,
                 "strict_tactic_recall": strict_tactic_recall,
+                "strict_tactic_precision": strict_tactic_precision if matched_top else 0.0,
                 "warnings": warnings,
             }
         )
@@ -1162,6 +1201,30 @@ def evaluate_path_reason(
                 "overlap_techniques": overlap_techniques,
                 "missed_gt_techniques": [item for item in gt_techniques if item not in overlap_techniques],
                 "extra_predicted_techniques": [item for item in pred_techniques if item not in overlap_techniques],
+            }
+        )
+        matched_task_ids = _sorted_unique([path.task_id for path, _ in matched_top])
+        tactic_comparison.append(
+            {
+                "window_id": window.window_id,
+                "host": window.host,
+                "matched_task_ids": matched_task_ids,
+                "gt_tactics": gt_tactics,
+                "predicted_tactics_union_top_n": pred_tactics,
+                "matched_tactics": overlap_tactics,
+                "missed_tactics": [item for item in gt_tactics if item not in overlap_tactics],
+                "extra_tactics": [item for item in pred_tactics if item not in overlap_tactics],
+            }
+        )
+        candidate_tactic_coverage.append(
+            {
+                "window_id": window.window_id,
+                "host": window.host,
+                "matched_task_ids": matched_task_ids,
+                "gt_tactics": gt_tactics,
+                "candidate_tactics_union_top_n": candidate_tactics,
+                "covered_gt_tactics": [item for item in gt_tactics if item in candidate_tactics],
+                "missing_candidate_tactics": [item for item in gt_tactics if item not in candidate_tactics],
             }
         )
 
@@ -1235,6 +1298,8 @@ def evaluate_path_reason(
         "strict_technique_precision_macro": _mean_or_zero(strict_precision_values),
         "strict_technique_precision_micro": _safe_ratio(technique_tp_total, technique_pred_total),
         "strict_tactic_recall_macro": _mean_or_zero(strict_tactic_recall_values),
+        "strict_tactic_precision_macro": _mean_or_zero(strict_tactic_precision_values),
+        "strict_tactic_precision_micro": _safe_ratio(tactic_tp_total, tactic_pred_total),
         "broad_technique_recall_macro": _mean_or_zero(broad_recall_values),
         "window_full_coverage_rate": _safe_ratio(full_coverage_count, len(confirmed_windows)),
         "window_pad_before_minutes": int(pad_minutes),
@@ -1242,7 +1307,7 @@ def evaluate_path_reason(
         "near_miss_minutes": int(near_miss_minutes),
         "matched_path_top_n": int(match_top_n),
     }
-    return summary, window_level, technique_comparison
+    return summary, window_level, technique_comparison, tactic_comparison, candidate_tactic_coverage
 
 
 def _best_path(
@@ -1330,7 +1395,7 @@ def run_evaluation(
         pad_minutes=pad_minutes,
         near_miss_minutes=near_miss_minutes,
     )
-    summary, window_level, technique_comparison = evaluate_path_reason(
+    summary, window_level, technique_comparison, tactic_comparison, candidate_tactic_coverage = evaluate_path_reason(
         strict_windows=strict_windows,
         predicted_paths=predicted_paths,
         path_assignments=assignments,
@@ -1344,6 +1409,9 @@ def run_evaluation(
     window_level_path = output_dir / "window_level_metrics.json"
     path_assignment_path = output_dir / "path_assignment.json"
     technique_comparison_path = output_dir / "technique_comparison.json"
+    tactic_comparison_path = output_dir / "tactic_comparison.json"
+    tactic_diff_by_task_path = output_dir / "tactic_diff_by_task.json"
+    candidate_tactic_coverage_path = output_dir / "candidate_tactic_coverage_by_task.json"
     technique_defs_path = output_dir / "technique_to_tactics.json"
     save_json(gt_windows_path, [item.to_dict() for item in strict_windows])
     save_json(predicted_paths_path, [item.to_dict() for item in predicted_paths])
@@ -1351,6 +1419,9 @@ def run_evaluation(
     save_json(window_level_path, window_level)
     save_json(path_assignment_path, assignments)
     save_json(technique_comparison_path, technique_comparison)
+    save_json(tactic_comparison_path, tactic_comparison)
+    save_json(tactic_diff_by_task_path, tactic_comparison)
+    save_json(candidate_tactic_coverage_path, candidate_tactic_coverage)
     save_json(technique_defs_path, technique_defs)
     return {
         "gt_windows_strict": str(gt_windows_path),
@@ -1359,6 +1430,9 @@ def run_evaluation(
         "window_level_metrics": str(window_level_path),
         "path_assignment": str(path_assignment_path),
         "technique_comparison": str(technique_comparison_path),
+        "tactic_comparison": str(tactic_comparison_path),
+        "tactic_diff_by_task": str(tactic_diff_by_task_path),
+        "candidate_tactic_coverage_by_task": str(candidate_tactic_coverage_path),
         "technique_to_tactics": str(technique_defs_path),
     }
 

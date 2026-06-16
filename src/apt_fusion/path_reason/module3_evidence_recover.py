@@ -108,7 +108,6 @@ def _task_evidence_frontier_dir(cfg: FusionConfig) -> Path:
 def _task_local_evidence_graph_dir(cfg: FusionConfig) -> Path:
     return cfg.module3_evidence_dir / "task_local_evidence_graph"
 
-
 def _task_slug(task_id: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(task_id)).strip("_") or "task"
 

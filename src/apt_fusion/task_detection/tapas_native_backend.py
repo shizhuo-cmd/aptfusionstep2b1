@@ -34,6 +34,7 @@ from .ocr_stat_features import extract_process_stat_features
 _WORKSPACE_DIRNAME = "tapas_native_workspace"
 _NATIVE_GRAPH_FILENAME = "tapas_native_graphs.pt"
 _MODULE1_SUMMARY_FILENAME = "tapas_native_module1_summary.json"
+_MODULE1_TASK_COMPONENT_DIAGNOSTICS_FILENAME = "task_component_diagnostics.json"
 _TASK_SCORE_FILENAME = "task_scores.csv"
 _TASK_SUMMARY_FILENAME = "task_subgraph_summary.json"
 _MODEL_FILENAME = "tapas_native_model.pkl"
@@ -82,7 +83,7 @@ def _build_graph_stat_sidecar_model(cfg: FusionConfig, labels: np.ndarray) -> tu
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def _vendor_tapas_root() -> Path:
@@ -121,6 +122,17 @@ def _late_fusion_requested(cfg: FusionConfig) -> bool:
         and cfg.use_sequence_embeddings
         and cfg.use_ocr_stat_features
     )
+
+
+def _graphsage_uses_stat_features(cfg: FusionConfig) -> bool:
+    return bool(cfg.use_ocr_stat_features and (cfg.graphsage_append_ocr_stat_features or not cfg.use_sequence_embeddings))
+
+
+def _graphsage_node_feature_sources(cfg: FusionConfig) -> dict[str, bool]:
+    return {
+        "sequence_embeddings": bool(cfg.use_sequence_embeddings),
+        "ocr_stat_features": bool(_graphsage_uses_stat_features(cfg)),
+    }
 
 
 def _tc3_supported_hosts() -> set[str]:
@@ -314,20 +326,41 @@ def _metrics_dict(labels: Sequence[int], probs: Sequence[float], preds: Sequence
     return metrics
 
 
-def _bundle_embeddings_for_stats(bundle: dict[str, Any]) -> dict[str, list[float]]:
-    if bundle.get("family") != "optc":
+def _bundle_stat_embeddings_for_sidecar(bundle: dict[str, Any]) -> dict[str, list[float]]:
+    selected_stats = bundle.get("selected_stat_embeddings", {})
+    if isinstance(selected_stats, dict) and selected_stats:
         return {
+            str(process_id): [float(value) for value in vector]
+            for process_id, vector in selected_stats.items()
+        }
+
+    stat_feature_dim = len(bundle.get("stat_feature_columns", []))
+    if stat_feature_dim <= 0:
+        return {}
+
+    base_feature_dim = int(bundle.get("base_sequence_feature_dim", bundle.get("sequence_feature_dim", 0)))
+    if bundle.get("family") != "optc":
+        merged_embeddings = {
             str(process_id): [float(value) for value in vector]
             for process_id, vector in bundle.get("selected_embeddings", {}).items()
         }
+    else:
+        merged_embeddings: dict[str, list[float]] = {}
+        for host_id in bundle.get("host_order", []):
+            for process_id, vector in bundle.get("embeddings_by_host", {}).get(host_id, {}).items():
+                merged_embeddings[str(process_id)] = [float(value) for value in vector]
+        for process_id, vector in bundle.get("selected_embeddings", {}).items():
+            merged_embeddings[str(process_id)] = [float(value) for value in vector]
 
-    merged: dict[str, list[float]] = {}
-    for host_id in bundle.get("host_order", []):
-        for process_id, vector in bundle.get("embeddings_by_host", {}).get(host_id, {}).items():
-            merged[str(process_id)] = [float(value) for value in vector]
-    for process_id, vector in bundle.get("selected_embeddings", {}).items():
-        merged[str(process_id)] = [float(value) for value in vector]
-    return merged
+    stats_map: dict[str, list[float]] = {}
+    for process_id, vector in merged_embeddings.items():
+        stats = [float(value) for value in vector[base_feature_dim : base_feature_dim + stat_feature_dim]]
+        if len(stats) < stat_feature_dim:
+            stats.extend([0.0] * (stat_feature_dim - len(stats)))
+        elif len(stats) > stat_feature_dim:
+            stats = stats[:stat_feature_dim]
+        stats_map[str(process_id)] = stats
+    return stats_map
 
 
 def _graph_stat_feature_dim(stat_dim: int) -> int:
@@ -338,8 +371,7 @@ def _graph_stat_feature_dim(stat_dim: int) -> int:
 
 def _graph_stat_feature_vector(
     process_ids: Sequence[Any],
-    embeddings_map: dict[str, list[float]],
-    base_feature_dim: int,
+    stat_embeddings_map: dict[str, list[float]],
     stat_feature_dim: int,
 ) -> np.ndarray:
     feature_dim = _graph_stat_feature_dim(stat_feature_dim)
@@ -351,8 +383,7 @@ def _graph_stat_feature_vector(
     nonzero_entries = 0
     total_entries = 0
     for process_id in process_ids:
-        vector = list(embeddings_map.get(str(process_id), []))
-        stats = [float(value) for value in vector[base_feature_dim : base_feature_dim + stat_feature_dim]]
+        stats = [float(value) for value in stat_embeddings_map.get(str(process_id), [])]
         if len(stats) < stat_feature_dim:
             stats.extend([0.0] * (stat_feature_dim - len(stats)))
         elif len(stats) > stat_feature_dim:
@@ -385,15 +416,14 @@ def _graph_stat_feature_vector(
 
 def _rows_to_graph_stat_matrix(
     rows: Sequence[dict[str, Any]],
-    embeddings_map: dict[str, list[float]],
-    base_feature_dim: int,
+    stat_embeddings_map: dict[str, list[float]],
     stat_feature_dim: int,
 ) -> np.ndarray:
     feature_dim = _graph_stat_feature_dim(stat_feature_dim)
     if not rows or feature_dim <= 0:
         return np.zeros((0, feature_dim), dtype=np.float64)
     matrix = [
-        _graph_stat_feature_vector(row.get("process_ids", []), embeddings_map, base_feature_dim, stat_feature_dim)
+        _graph_stat_feature_vector(row.get("process_ids", []), stat_embeddings_map, stat_feature_dim)
         for row in rows
     ]
     return np.asarray(matrix, dtype=np.float64)
@@ -426,15 +456,14 @@ def _fit_graph_stat_sidecar_model(
         return None, info
 
     stat_feature_dim = len(bundle.get("stat_feature_columns", []))
-    base_feature_dim = int(bundle.get("base_sequence_feature_dim", bundle.get("sequence_feature_dim", 0)))
     feature_dim = _graph_stat_feature_dim(stat_feature_dim)
     info["feature_dim"] = feature_dim
     if stat_feature_dim <= 0 or feature_dim <= 0:
         info["reason"] = "missing_stat_features"
         return None, info
 
-    embeddings_map = _bundle_embeddings_for_stats(bundle)
-    train_matrix = _rows_to_graph_stat_matrix(train_rows, embeddings_map, base_feature_dim, stat_feature_dim)
+    stat_embeddings_map = _bundle_stat_embeddings_for_sidecar(bundle)
+    train_matrix = _rows_to_graph_stat_matrix(train_rows, stat_embeddings_map, stat_feature_dim)
     labels = np.asarray([int(row.get("task_label", 0)) for row in train_rows], dtype=np.int64)
     if len(train_matrix) == 0:
         info["reason"] = "empty_training_rows"
@@ -487,9 +516,8 @@ def _apply_graph_stat_late_fusion(
         return copied_rows, _rows_metrics(copied_rows)
 
     stat_feature_dim = len(bundle.get("stat_feature_columns", []))
-    base_feature_dim = int(bundle.get("base_sequence_feature_dim", bundle.get("sequence_feature_dim", 0)))
-    embeddings_map = _bundle_embeddings_for_stats(bundle)
-    matrix = _rows_to_graph_stat_matrix(rows, embeddings_map, base_feature_dim, stat_feature_dim)
+    stat_embeddings_map = _bundle_stat_embeddings_for_sidecar(bundle)
+    matrix = _rows_to_graph_stat_matrix(rows, stat_embeddings_map, stat_feature_dim)
     if len(matrix) == 0:
         copied_rows = [copy.deepcopy(row) for row in rows]
         return copied_rows, _rows_metrics(copied_rows)
@@ -533,24 +561,42 @@ def _decompose_tc3_metadata(
 ) -> list[dict[str, Any]]:
     if isinstance(edge_list, dict) and "task_components" in edge_list:
         data = []
+        diagnostics = list(edge_list.get("task_component_diagnostics", []))
         task_index = 0
         for component in edge_list.get("task_components", []):
             node_ids = [str(node) for node in component.get("nodes", [])]
             if len(node_ids) < 2:
                 continue
             attacknum = sum(1 for node in node_ids if str(node) in ground_truth)
-            data.append(
-                {
-                    "task_id": f"task_{task_index:04d}",
-                    "node_ids": node_ids,
-                    "label": 1 if attacknum > 0 else 0,
-                    "attacknum": attacknum,
-                    "task_size": len(node_ids),
-                    "internal_edge_count": len(component.get("edges", [])),
-                    "task_root_id": str(component.get("task_root", "")),
-                    "boundary_node_ids": [str(node) for node in component.get("boundary_nodes", [])],
-                }
-            )
+            payload = {
+                "task_id": f"task_{task_index:04d}",
+                "node_ids": node_ids,
+                "label": 1 if attacknum > 0 else 0,
+                "attacknum": attacknum,
+                "task_size": len(node_ids),
+                "internal_edge_count": len(component.get("edges", [])),
+                "task_root_id": str(component.get("task_root", "")),
+                "boundary_node_ids": [str(node) for node in component.get("boundary_nodes", [])],
+            }
+            if task_index < len(diagnostics) and isinstance(diagnostics[task_index], dict):
+                diag = diagnostics[task_index]
+                payload.update(
+                    {
+                        "task_root_total_children": int(diag.get("task_root_total_children", 0) or 0),
+                        "task_root_effective_children": int(diag.get("task_root_effective_children", 0) or 0),
+                        "task_root_segmented": bool(diag.get("task_root_segmented", False)),
+                        "task_root_parent_missing": bool(diag.get("task_root_parent_missing", False)),
+                        "child_threshold": int(diag.get("child_threshold", edge_list.get("child_threshold", 0)) or 0),
+                        "split_mode": str(diag.get("split_mode", edge_list.get("split_mode", ""))),
+                        "count_segmented_children_upstream": bool(
+                            diag.get(
+                                "count_segmented_children_upstream",
+                                edge_list.get("count_segmented_children_upstream", False),
+                            )
+                        ),
+                    }
+                )
+            data.append(payload)
             task_index += 1
         return data
     # Sidecar metadata only. Training/evaluation graphs come directly from the
@@ -793,6 +839,7 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
     task_component_kwargs = {
         "child_threshold": int(cfg.task_component_child_threshold),
         "split_mode": str(cfg.task_component_split_mode),
+        "count_segmented_children_upstream": bool(cfg.task_component_count_segmented_children_upstream),
     }
 
     with _temporary_cwd(workspace):
@@ -915,55 +962,97 @@ def _build_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
     raise ValueError("Exact TAPAS module1/module2 currently support dataset_family 'tc3' and 'optc' only")
 
 
-def _append_stats_to_embeddings_and_graphs(
+def _extract_stat_embeddings_for_graphs(
     cfg: FusionConfig,
-    embeddings_map: dict[str, list[float]],
-    graphs: list[dict[str, Any]],
     graph_metas: list[dict[str, Any]],
-) -> tuple[dict[str, list[float]], list[dict[str, Any]], list[str], int]:
+) -> tuple[dict[str, list[float]], list[str]]:
     process_ids = {str(node) for meta in graph_metas for node in meta.get("node_ids", [])}
     if not process_ids:
-        base_dim = _feature_dim_from_map(embeddings_map) if cfg.use_sequence_embeddings else 0
-        return embeddings_map, graphs, [], base_dim
+        return {}, []
 
     stats_df = extract_process_stat_features(cfg, process_ids)
     stat_columns = [column for column in stats_df.columns if column != "process_id"]
     if not stat_columns:
-        base_dim = _feature_dim_from_map(embeddings_map) if cfg.use_sequence_embeddings else 0
-        return embeddings_map, graphs, [], base_dim
+        return {}, []
 
-    base_dim = _feature_dim_from_map(embeddings_map) if cfg.use_sequence_embeddings else 0
-    stat_dim = len(stat_columns)
-    combined_dim = base_dim + stat_dim
-    zero_stats = [0.0] * stat_dim
     stats_map = {
         str(row["process_id"]): [float(row[column]) for column in stat_columns]
         for row in stats_df.to_dict(orient="records")
     }
+    return stats_map, stat_columns
 
+
+def _compose_graphsage_embeddings(
+    base_embeddings: dict[str, list[float]],
+    base_dim: int,
+    stat_embeddings: dict[str, list[float]],
+    stat_feature_dim: int,
+) -> dict[str, list[float]]:
     combined_embeddings: dict[str, list[float]] = {}
-    all_process_ids = set(embeddings_map.keys()) | process_ids
+    zero_stats = [0.0] * stat_feature_dim
+    all_process_ids = set(base_embeddings.keys()) | set(stat_embeddings.keys())
     for process_id in all_process_ids:
-        base_vector = [float(value) for value in embeddings_map.get(process_id, [0.0] * base_dim)]
+        base_vector = [float(value) for value in base_embeddings.get(process_id, [0.0] * base_dim)]
         if len(base_vector) < base_dim:
             base_vector.extend([0.0] * (base_dim - len(base_vector)))
         elif len(base_vector) > base_dim:
             base_vector = base_vector[:base_dim]
-        combined_embeddings[process_id] = base_vector + list(stats_map.get(process_id, zero_stats))
+        stats_vector = [float(value) for value in stat_embeddings.get(process_id, zero_stats)]
+        if len(stats_vector) < stat_feature_dim:
+            stats_vector.extend([0.0] * (stat_feature_dim - len(stats_vector)))
+        elif len(stats_vector) > stat_feature_dim:
+            stats_vector = stats_vector[:stat_feature_dim]
+        combined_embeddings[process_id] = base_vector + stats_vector
+    return combined_embeddings
 
+
+def _materialize_graph_node_vectors(
+    graphs: list[dict[str, Any]],
+    graph_metas: list[dict[str, Any]],
+    embeddings_map: dict[str, list[float]],
+) -> list[dict[str, Any]]:
+    feature_dim = _feature_dim_from_map(embeddings_map)
     updated_graphs = copy.deepcopy(graphs)
     for graph, meta in zip(updated_graphs, graph_metas):
         graph["nodes"] = [
-            [float(value) for value in combined_embeddings.get(str(node_id), [0.0] * combined_dim)]
+            [float(value) for value in embeddings_map.get(str(node_id), [0.0] * feature_dim)]
             for node_id in meta.get("node_ids", [])
         ]
-    return combined_embeddings, updated_graphs, stat_columns, base_dim
+    return updated_graphs
+
+
+def _apply_graphsage_feature_policy(
+    cfg: FusionConfig,
+    embeddings_map: dict[str, list[float]],
+    graphs: list[dict[str, Any]],
+    graph_metas: list[dict[str, Any]],
+    stat_embeddings: dict[str, list[float]],
+    stat_columns: list[str],
+) -> tuple[dict[str, list[float]], list[dict[str, Any]], int]:
+    base_dim = _feature_dim_from_map(embeddings_map) if cfg.use_sequence_embeddings else 0
+    stat_dim = len(stat_columns)
+    if cfg.use_sequence_embeddings:
+        graphsage_embeddings = {
+            str(process_id): [float(value) for value in vector]
+            for process_id, vector in embeddings_map.items()
+        }
+        if _graphsage_uses_stat_features(cfg) and stat_dim > 0:
+            graphsage_embeddings = _compose_graphsage_embeddings(graphsage_embeddings, base_dim, stat_embeddings, stat_dim)
+    else:
+        graphsage_embeddings = {
+            str(process_id): [float(value) for value in vector]
+            for process_id, vector in stat_embeddings.items()
+        }
+
+    updated_graphs = _materialize_graph_node_vectors(graphs, graph_metas, graphsage_embeddings)
+    return graphsage_embeddings, updated_graphs, base_dim
 
 
 def _append_stats_to_bundle(cfg: FusionConfig, bundle: dict[str, Any]) -> dict[str, Any]:
     updated = copy.deepcopy(bundle)
     updated["base_sequence_feature_dim"] = int(bundle["sequence_feature_dim"]) if cfg.use_sequence_embeddings else 0
     updated["stat_feature_columns"] = []
+    updated["selected_stat_embeddings"] = {}
     if not cfg.use_sequence_embeddings:
         if updated["family"] == "tc3":
             updated["selected_embeddings"] = {}
@@ -974,12 +1063,19 @@ def _append_stats_to_bundle(cfg: FusionConfig, bundle: dict[str, Any]) -> dict[s
         return updated
 
     if updated["family"] == "tc3":
-        embeddings, graphs, stat_columns, base_dim = _append_stats_to_embeddings_and_graphs(
+        stat_embeddings, stat_columns = _extract_stat_embeddings_for_graphs(
+            cfg,
+            updated["selected_graph_metas"],
+        )
+        embeddings, graphs, base_dim = _apply_graphsage_feature_policy(
             cfg,
             updated["selected_embeddings"],
             updated["selected_graphs"],
             updated["selected_graph_metas"],
+            stat_embeddings,
+            stat_columns,
         )
+        updated["selected_stat_embeddings"] = stat_embeddings
         updated["selected_embeddings"] = embeddings
         updated["selected_graphs"] = graphs
         updated["base_sequence_feature_dim"] = base_dim
@@ -988,24 +1084,33 @@ def _append_stats_to_bundle(cfg: FusionConfig, bundle: dict[str, Any]) -> dict[s
 
     updated_embeddings_by_host: dict[str, dict[str, list[float]]] = {}
     updated_graphs_by_host: dict[str, list[dict[str, Any]]] = {}
+    updated_stat_embeddings_by_host: dict[str, dict[str, list[float]]] = {}
     stat_columns: list[str] = []
     base_dim = int(updated["base_sequence_feature_dim"])
     for host_id in updated["host_order"]:
         host_cfg = copy.copy(cfg)
         host_cfg.host = f"SysClient{host_id}"
-        embeddings, graphs, host_stat_columns, host_base_dim = _append_stats_to_embeddings_and_graphs(
+        host_stat_embeddings, host_stat_columns = _extract_stat_embeddings_for_graphs(
+            host_cfg,
+            updated["raw_graph_metas_by_host"].get(host_id, []),
+        )
+        embeddings, graphs, host_base_dim = _apply_graphsage_feature_policy(
             host_cfg,
             updated["embeddings_by_host"].get(host_id, {}),
             updated["raw_graphs_by_host"].get(host_id, []),
             updated["raw_graph_metas_by_host"].get(host_id, []),
+            host_stat_embeddings,
+            host_stat_columns,
         )
         updated_embeddings_by_host[host_id] = embeddings
         updated_graphs_by_host[host_id] = graphs
+        updated_stat_embeddings_by_host[host_id] = host_stat_embeddings
         if host_stat_columns:
             stat_columns = host_stat_columns
         base_dim = host_base_dim
     updated["embeddings_by_host"] = updated_embeddings_by_host
     updated["raw_graphs_by_host"] = updated_graphs_by_host
+    updated["stat_embeddings_by_host"] = updated_stat_embeddings_by_host
     updated["base_sequence_feature_dim"] = base_dim
     updated["stat_feature_columns"] = stat_columns
 
@@ -1014,17 +1119,21 @@ def _append_stats_to_bundle(cfg: FusionConfig, bundle: dict[str, Any]) -> dict[s
         selected_graphs: list[dict[str, Any]] = []
         selected_graph_metas: list[dict[str, Any]] = []
         selected_embeddings: dict[str, list[float]] = {}
+        selected_stat_embeddings: dict[str, list[float]] = {}
         for host_id in updated["host_order"]:
             selected_graphs.extend(copy.deepcopy(updated_graphs_by_host.get(host_id, [])))
             selected_graph_metas.extend(copy.deepcopy(updated["raw_graph_metas_by_host"].get(host_id, [])))
             selected_embeddings.update(copy.deepcopy(updated_embeddings_by_host.get(host_id, {})))
+            selected_stat_embeddings.update(copy.deepcopy(updated_stat_embeddings_by_host.get(host_id, {})))
         updated["selected_graphs"] = selected_graphs
         updated["selected_graph_metas"] = selected_graph_metas
         updated["selected_embeddings"] = selected_embeddings
+        updated["selected_stat_embeddings"] = selected_stat_embeddings
     else:
         updated["selected_graphs"] = copy.deepcopy(updated_graphs_by_host[selected_name])
         updated["selected_graph_metas"] = copy.deepcopy(updated["raw_graph_metas_by_host"][selected_name])
         updated["selected_embeddings"] = copy.deepcopy(updated_embeddings_by_host[selected_name])
+        updated["selected_stat_embeddings"] = copy.deepcopy(updated_stat_embeddings_by_host.get(selected_name, {}))
     return updated
 
 
@@ -1033,6 +1142,7 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
     embeddings_path = out_dir / "process_embeddings.csv"
     task_path = out_dir / "task_subgraphs.json"
     segmentation_edges_path = out_dir / "process_segmentation_edges.csv"
+    task_component_diagnostics_path = out_dir / _MODULE1_TASK_COMPONENT_DIAGNOSTICS_FILENAME
     native_graph_path = _module1_graph_path(out_dir)
     summary_path = _module1_summary_path(out_dir)
 
@@ -1057,9 +1167,32 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
             for meta in bundle["selected_graph_metas"]
         ],
     )
+    task_component_diagnostics = []
+    for meta in bundle["selected_graph_metas"]:
+        task_component_diagnostics.append(
+            {
+                "task_id": str(meta.get("task_id", "")),
+                "task_root_id": str(meta.get("task_root_id", "")).strip(),
+                "task_size": int(meta.get("task_size", len(meta.get("node_ids", [])))),
+                "internal_edge_count": int(meta.get("internal_edge_count", 0)),
+                "boundary_node_count": len(meta.get("boundary_node_ids", [])),
+                "task_root_total_children": int(meta.get("task_root_total_children", 0) or 0),
+                "task_root_effective_children": int(meta.get("task_root_effective_children", 0) or 0),
+                "task_root_segmented": bool(meta.get("task_root_segmented", False)),
+                "task_root_parent_missing": bool(meta.get("task_root_parent_missing", False)),
+                "child_threshold": int(meta.get("child_threshold", 0) or 0),
+                "split_mode": str(meta.get("split_mode", "")),
+                "count_segmented_children_upstream": bool(
+                    meta.get("count_segmented_children_upstream", False)
+                ),
+            }
+        )
+    save_json(task_component_diagnostics_path, task_component_diagnostics)
     _build_segmentation_frame(bundle["selected_edge_list"]).to_csv(segmentation_edges_path, index=False)
     torch.save(bundle, native_graph_path)
 
+    large_task_gt_500 = sum(1 for row in task_component_diagnostics if int(row.get("task_size", 0) or 0) > 500)
+    large_task_gt_1000 = sum(1 for row in task_component_diagnostics if int(row.get("task_size", 0) or 0) > 1000)
     summary = {
         "backend": "tapas_exact_vendor",
         "dataset_family": cfg.dataset_family,
@@ -1071,6 +1204,12 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
         "segmentation_edge_count": len(bundle["selected_edge_list"]),
         "use_sequence_embeddings": bool(cfg.use_sequence_embeddings),
         "use_ocr_stat_features": bool(cfg.use_ocr_stat_features),
+        "graphsage_append_ocr_stat_features": bool(cfg.graphsage_append_ocr_stat_features),
+        "graphsage_node_feature_sources": _graphsage_node_feature_sources(cfg),
+        "graph_stat_sidecar_sources": {
+            "ocr_stat_features": bool(cfg.use_ocr_stat_features),
+        },
+        "graphsage_feature_dim": int(feature_dim),
         "sequence_feature_dim": int(bundle.get("base_sequence_feature_dim", feature_dim)),
         "stat_feature_dim": len(bundle.get("stat_feature_columns", [])),
         "stat_feature_columns": list(bundle.get("stat_feature_columns", [])),
@@ -1078,6 +1217,14 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
         "tapas_exact": True,
         "source_chain": "official_parser_to_decompose",
         "graph_metadata_sidecar_export_only": True,
+        "task_component_split_mode": str(cfg.task_component_split_mode),
+        "task_component_child_threshold": int(cfg.task_component_child_threshold),
+        "task_component_count_segmented_children_upstream": bool(
+            cfg.task_component_count_segmented_children_upstream
+        ),
+        "task_component_diagnostics_path": str(task_component_diagnostics_path),
+        "large_task_count_gt_500": int(large_task_gt_500),
+        "large_task_count_gt_1000": int(large_task_gt_1000),
     }
     if cfg.dataset_family == "optc":
         summary["official_optc_training_hosts"] = list(bundle.get("host_order", []))
@@ -1087,6 +1234,7 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
         "process_embeddings": embeddings_path,
         "task_subgraphs": task_path,
         "process_segmentation_edges": segmentation_edges_path,
+        "task_component_diagnostics": task_component_diagnostics_path,
         "tapas_native_graphs": native_graph_path,
         "tapas_native_summary": summary_path,
     }
@@ -1229,6 +1377,12 @@ def _tc3_trace_augmentation_bonus(cfg: FusionConfig) -> int:
     return 0
 
 
+def _tc3_augmentation_divisor(cfg: FusionConfig) -> int:
+    if not bool(cfg.task_tapas_augmentation_enabled):
+        return 0
+    return max(0, int(cfg.task_tapas_augmentation_divisor))
+
+
 def _augment_graphs_preserve_stats_tc3(
     cfg: FusionConfig,
     vendor: ModuleType,
@@ -1241,18 +1395,27 @@ def _augment_graphs_preserve_stats_tc3(
         return copy.deepcopy(graphs), copy.deepcopy(graph_metas)
     if not graphs:
         return [], []
+    divisor = _tc3_augmentation_divisor(cfg)
     trace_bonus = _tc3_trace_augmentation_bonus(cfg)
     if not graphs[0].get("nodes") or len(graphs[0]["nodes"][0]) <= base_feature_dim:
-        return vendor.data_deal(copy.deepcopy(graphs), dataset_name), _augment_graph_metas(graph_metas, 2000, bonus=trace_bonus)
+        if divisor <= 0:
+            return copy.deepcopy(graphs), copy.deepcopy(graph_metas)
+        return vendor.data_deal(copy.deepcopy(graphs), dataset_name, divisor=divisor, bonus=trace_bonus), _augment_graph_metas(
+            graph_metas,
+            divisor,
+            bonus=trace_bonus,
+        )
 
     data_pro: list[dict[str, Any]] = []
     meta_pro: list[dict[str, Any]] = []
     count = len(graphs)
     for graph, graph_meta in zip(copy.deepcopy(graphs), copy.deepcopy(graph_metas)):
         if int(graph.get("label", 0)) == 1:
-            needadd = max(0, (count // 2000) + trace_bonus)
+            needadd = max(0, (count // divisor) + trace_bonus) if divisor > 0 else 0
             data_pro.append(graph)
             meta_pro.append(graph_meta)
+            if needadd <= 0:
+                continue
             seq_nodes = [list(node[:base_feature_dim]) for node in graph["nodes"]]
             stat_suffix = [list(node[base_feature_dim:]) for node in graph["nodes"]]
             augmented_seq_nodes = vendor.dataenhance(copy.deepcopy(seq_nodes), needadd, dataset_name)
@@ -1465,10 +1628,11 @@ def _summary_common(cfg: FusionConfig, bundle: dict[str, Any], model_path: Path)
         "average_mode": "macro",
         "tapas_exact": True,
         "source_chain": "official_parser_encode_cut_task_decompose_data_deal_train",
-        "node_feature_sources": {
-            "sequence_embeddings": bool(cfg.use_sequence_embeddings),
+        "node_feature_sources": _graphsage_node_feature_sources(cfg),
+        "graph_stat_sidecar_sources": {
             "ocr_stat_features": bool(cfg.use_ocr_stat_features),
         },
+        "graphsage_append_ocr_stat_features": bool(cfg.graphsage_append_ocr_stat_features),
         "decision_threshold": 0.5,
         "decision_threshold_mode": "argmax",
         "decision_threshold_selection": {
@@ -1487,10 +1651,10 @@ def _summary_common(cfg: FusionConfig, bundle: dict[str, Any], model_path: Path)
         "task_min_graph_nodes": 2,
         "task_graph_bidirectional_edges": False,
         "task_graph_self_loops": False,
-        "tapas_augmentation_enabled": True,
-        "tapas_augmentation_divisor": 2000,
+        "tapas_augmentation_enabled": bool(cfg.task_tapas_augmentation_enabled),
+        "tapas_augmentation_divisor": int(cfg.task_tapas_augmentation_divisor),
         "tapas_trace_augmentation_bonus": int(cfg.task_tapas_trace_augmentation_bonus),
-        "tapas_augmentation_before_split": True,
+        "tapas_augmentation_before_split": bool(cfg.task_tapas_augmentation_before_split),
         "tapas_faithful_mode": True,
         "model_input": str(_model_input_path(cfg, model_path.parent)) if cfg.task_detector_mode == "load_and_predict" else "",
         "model_output": str(model_path),

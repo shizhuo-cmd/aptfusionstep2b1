@@ -11,6 +11,7 @@ from apt_fusion.path_reason.module6_attack_reason import (
     _render_compact_mapping_context,
     _render_compact_path_dossier,
     _synthetic_bundle_for_attack_kb,
+    _validate_mappings,
     _user_prompt_extract,
     _user_prompt_map,
 )
@@ -218,6 +219,175 @@ class AttackReasonContextTests(unittest.TestCase):
         )
         self.assertEqual(full_cfg.claim_attack_prior_mode, "full")
         self.assertEqual(disabled_cfg.claim_attack_prior_mode, "disabled")
+
+    def test_tactics_only_prompt_omits_technique_candidates(self) -> None:
+        context = {
+            "attack_mapping_scope": "tactics_only",
+            "path_dossier": {
+                "task_id": "task_1",
+                "path_id": "task_1_path_0",
+                "path_type": "linear",
+                "risk_level": "high",
+                "risk_score": 0.91,
+                "stage_coverage": ["Execution"],
+                "family_tags": ["callback_c2"],
+                "core_processes": [{"process_guid": "p1", "name": "bash", "labels": ["P_UNTRUSTED_CTX"]}],
+                "bridge_edges": [],
+                "evidence_timeline": [],
+            },
+            "claims": [
+                {
+                    "claim_id": "c1",
+                    "behavior_type": "cnc_communication",
+                    "confidence": 0.9,
+                    "evidence_event_ids": ["e1"],
+                    "statement": "bash repeatedly connected to a remote endpoint",
+                }
+            ],
+            "claim_graph": {"edges": [], "diagnostics": {"matched_atoms": ["cnc_communication"]}},
+            "claim_attack_hints": [],
+            "attack_candidates": {
+                "tactics": [{"external_id": "TA0011", "name": "Command and Control", "score": 0.9, "tactic_ids": ["TA0011"]}],
+                "techniques": [{"external_id": "T1071.001", "name": "Web Protocols", "score": 0.8}],
+            },
+        }
+        compact = _render_compact_mapping_context(context)
+        prompt = _user_prompt_map(context, include_claim_attack_hints=False)
+        self.assertIn("TACTIC_CANDIDATES", compact)
+        self.assertNotIn("TECHNIQUE_CANDIDATES", compact)
+        self.assertNotIn("TECHNIQUE_CANDIDATES", prompt)
+        self.assertIn("tactic-only", prompt.lower())
+
+    def test_validate_mappings_normalizes_event_ids_to_claim_ids(self) -> None:
+        cfg = SimpleNamespace(
+            claim_attack_prior_mode="disabled",
+            attack_mapping_scope="tactics_only",
+            attack_kb_stix_path=None,
+            attack_kb_embedding_model_name="sentence-transformers/all-MiniLM-L6-v2",
+            attack_kb_enable_vector=False,
+        )
+        claims = [
+            {
+                "claim_id": "c1",
+                "behavior_type": "cnc_communication",
+                "statement": "bash talked to a remote endpoint",
+                "evidence_event_ids": ["e1", "e2"],
+                "confidence": 0.9,
+            }
+        ]
+        attack_candidates = {
+            "tactics": [{"external_id": "TA0011", "name": "Command and Control", "tactic_ids": ["TA0011"]}],
+            "techniques": [],
+        }
+        mappings, summary = _validate_mappings(
+            cfg,
+            {},
+            [
+                {
+                    "tactic_id": "TA0011",
+                    "tactic": "Command and Control",
+                    "technique_id": "",
+                    "technique": "",
+                    "evidence_claim_ids": ["e1"],
+                    "confidence": 0.88,
+                    "gaps": [],
+                }
+            ],
+            attack_candidates,
+            claims,
+        )
+        self.assertEqual(len(mappings), 1)
+        self.assertEqual(mappings[0]["evidence_claim_ids"], ["c1"])
+        self.assertEqual(summary["raw_event_id_ref_count"], 1)
+        self.assertEqual(summary["normalized_event_id_claim_ref_count"], 1)
+        self.assertEqual(summary["kept_mapping_count"], 1)
+
+    def test_validate_mappings_deduplicates_claim_and_event_refs(self) -> None:
+        cfg = SimpleNamespace(
+            claim_attack_prior_mode="disabled",
+            attack_mapping_scope="tactics_only",
+            attack_kb_stix_path=None,
+            attack_kb_embedding_model_name="sentence-transformers/all-MiniLM-L6-v2",
+            attack_kb_enable_vector=False,
+        )
+        claims = [
+            {
+                "claim_id": "c1",
+                "behavior_type": "cnc_communication",
+                "statement": "bash talked to a remote endpoint",
+                "evidence_event_ids": ["e1"],
+                "confidence": 0.9,
+            }
+        ]
+        attack_candidates = {
+            "tactics": [{"external_id": "TA0011", "name": "Command and Control", "tactic_ids": ["TA0011"]}],
+            "techniques": [],
+        }
+        mappings, summary = _validate_mappings(
+            cfg,
+            {},
+            [
+                {
+                    "tactic_id": "TA0011",
+                    "tactic": "Command and Control",
+                    "technique_id": "",
+                    "technique": "",
+                    "evidence_claim_ids": ["c1", "e1", "c1", "missing"],
+                    "confidence": 0.88,
+                    "gaps": [],
+                }
+            ],
+            attack_candidates,
+            claims,
+        )
+        self.assertEqual(len(mappings), 1)
+        self.assertEqual(mappings[0]["evidence_claim_ids"], ["c1"])
+        self.assertEqual(summary["raw_claim_id_ref_count"], 2)
+        self.assertEqual(summary["raw_event_id_ref_count"], 1)
+        self.assertEqual(summary["raw_unknown_id_ref_count"], 1)
+        self.assertEqual(summary["mappings_with_unknown_id_refs_count"], 1)
+
+    def test_validate_mappings_tracks_normalized_empty_mappings(self) -> None:
+        cfg = SimpleNamespace(
+            claim_attack_prior_mode="disabled",
+            attack_mapping_scope="tactics_only",
+            attack_kb_stix_path=None,
+            attack_kb_embedding_model_name="sentence-transformers/all-MiniLM-L6-v2",
+            attack_kb_enable_vector=False,
+        )
+        claims = [
+            {
+                "claim_id": "c1",
+                "behavior_type": "cnc_communication",
+                "statement": "bash talked to a remote endpoint",
+                "evidence_event_ids": ["e1"],
+                "confidence": 0.9,
+            }
+        ]
+        attack_candidates = {
+            "tactics": [{"external_id": "TA0011", "name": "Command and Control", "tactic_ids": ["TA0011"]}],
+            "techniques": [],
+        }
+        mappings, summary = _validate_mappings(
+            cfg,
+            {},
+            [
+                {
+                    "tactic_id": "TA0011",
+                    "tactic": "Command and Control",
+                    "technique_id": "",
+                    "technique": "",
+                    "evidence_claim_ids": ["unknown_event_id"],
+                    "confidence": 0.88,
+                    "gaps": [],
+                }
+            ],
+            attack_candidates,
+            claims,
+        )
+        self.assertEqual(mappings, [])
+        self.assertEqual(summary["mappings_normalized_to_empty_count"], 1)
+        self.assertEqual(summary["kept_mapping_count"], 0)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -37,12 +39,24 @@ class PathReasonEvalTests(unittest.TestCase):
 | T1189 | Drive-by Compromise | INITIAL_ACCESS | desc | url |
 | T1055 | Process Injection | DEFENSE_EVASION/PRIVILEGE_ESCALATION | desc | url |
 """
-        path = Path("D:/daima/APT-Fusion/.tmp_path_reason_eval_strict.md")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            suffix="_path_reason_eval_strict.md",
+            delete=False,
+            dir="D:/daima/APT-Fusionstep2b1",
+        ) as handle:
+            handle.write(markdown)
+            temp_name = handle.name
+        path = Path(temp_name)
         try:
-            path.write_text(markdown, encoding="utf-8")
             windows, technique_defs = parse_gt_windows_strict(path)
         finally:
-            path.unlink(missing_ok=True)
+            try:
+                if path.exists():
+                    os.remove(path)
+            except PermissionError:
+                pass
         self.assertIn("T1203", technique_defs)
         self.assertEqual(len(windows), 3)
         confirmed = next(item for item in windows if item.source_ref == "搂3.15")
@@ -86,8 +100,10 @@ class PathReasonEvalTests(unittest.TestCase):
             stage_coverage=["Entry"],
             process_chain=["a"],
             bridge_objects=[],
+            candidate_tactics=[],
             predicted_tactics=[],
             predicted_techniques=[],
+            attack_mapping_scope="full",
             warnings=[],
             candidate_paths_path="",
             report_path="",
@@ -103,8 +119,10 @@ class PathReasonEvalTests(unittest.TestCase):
             stage_coverage=["Entry"],
             process_chain=["b"],
             bridge_objects=[],
+            candidate_tactics=[],
             predicted_tactics=[],
             predicted_techniques=[],
+            attack_mapping_scope="full",
             warnings=[],
             candidate_paths_path="",
             report_path="",
@@ -120,8 +138,10 @@ class PathReasonEvalTests(unittest.TestCase):
             stage_coverage=["Entry"],
             process_chain=["c"],
             bridge_objects=[],
+            candidate_tactics=[],
             predicted_tactics=[],
             predicted_techniques=[],
+            attack_mapping_scope="full",
             warnings=[],
             candidate_paths_path="",
             report_path="",
@@ -182,12 +202,24 @@ class PathReasonEvalTests(unittest.TestCase):
             primary_report_name="TC_Ground_Truth_Report_E3_Update.pdf",
             primary_report_path="D:/download/TC_Ground_Truth_Report_E3_Update.pdf",
         )
-        path = Path("D:/daima/APT-Fusion/.tmp_path_reason_eval_gt.json")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            suffix="_path_reason_eval_gt.json",
+            delete=False,
+            dir="D:/daima/APT-Fusionstep2b1",
+        ) as handle:
+            handle.write(__import__("json").dumps(reference, ensure_ascii=False, indent=2))
+            temp_name = handle.name
+        path = Path(temp_name)
         try:
-            path.write_text(__import__("json").dumps(reference, ensure_ascii=False, indent=2), encoding="utf-8")
             filtered_windows, technique_defs, metadata = load_gt_reference(path, host_filter="TRACE")
         finally:
-            path.unlink(missing_ok=True)
+            try:
+                if path.exists():
+                    os.remove(path)
+            except PermissionError:
+                pass
         self.assertEqual(len(filtered_windows), 1)
         self.assertEqual(filtered_windows[0].host, "TRACE")
         self.assertEqual(filtered_windows[0].attack_summary, "browser exploit to shell and callback")

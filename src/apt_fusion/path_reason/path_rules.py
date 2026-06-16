@@ -14,7 +14,7 @@ _PATH_REASON_DEFAULT_NAME = "path_reason_default.yaml"
 
 
 def _default_rules_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "configs" / _PATH_REASON_DEFAULT_NAME
+    return Path(__file__).resolve().parents[3] / "configs" / _PATH_REASON_DEFAULT_NAME
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

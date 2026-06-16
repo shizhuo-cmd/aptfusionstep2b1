@@ -679,6 +679,13 @@ class CandidatePath:
     support_relations: list[str] = field(default_factory=list)
     context_ids: list[str] = field(default_factory=list)
     chain_kind: str = ""
+    family_tags: list[str] = field(default_factory=list)
+    precursor_event_ids: list[str] = field(default_factory=list)
+    followup_event_ids: list[str] = field(default_factory=list)
+    network_support_summary: str = ""
+    object_lineage_summary: str = ""
+    holmes_matched_atoms: list[str] = field(default_factory=list)
+    missed_truth_like_hints: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -703,6 +710,13 @@ class CandidatePath:
             "support_relations": list(self.support_relations),
             "context_ids": list(self.context_ids),
             "chain_kind": self.chain_kind,
+            "family_tags": list(self.family_tags),
+            "precursor_event_ids": list(self.precursor_event_ids),
+            "followup_event_ids": list(self.followup_event_ids),
+            "network_support_summary": self.network_support_summary,
+            "object_lineage_summary": self.object_lineage_summary,
+            "holmes_matched_atoms": list(self.holmes_matched_atoms),
+            "missed_truth_like_hints": list(self.missed_truth_like_hints),
         }
 
     @classmethod
@@ -727,5 +741,12 @@ class CandidatePath:
             support_relations=[str(item) for item in payload.get("support_relations", [])],
             context_ids=[str(item) for item in payload.get("context_ids", [])],
             chain_kind=str(payload.get("chain_kind", "")).strip(),
+            family_tags=[str(item) for item in payload.get("family_tags", [])],
+            precursor_event_ids=[str(item) for item in payload.get("precursor_event_ids", [])],
+            followup_event_ids=[str(item) for item in payload.get("followup_event_ids", [])],
+            network_support_summary=str(payload.get("network_support_summary", "")).strip(),
+            object_lineage_summary=str(payload.get("object_lineage_summary", "")).strip(),
+            holmes_matched_atoms=[str(item) for item in payload.get("holmes_matched_atoms", [])],
+            missed_truth_like_hints=[str(item) for item in payload.get("missed_truth_like_hints", [])],
         )
 

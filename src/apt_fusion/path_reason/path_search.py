@@ -30,6 +30,7 @@ def search_candidate_paths(
     max_span_minutes = float(rules.get("path_search.max_total_span_minutes", 180))
     max_gap_minutes = float(rules.get("path_search.max_time_gap_minutes", 120))
     top_k = int(rules.get("path_search.top_k", 20))
+    pre_rank_limit = max(top_k, int(rules.get("path_search.pre_rank_limit", max(top_k * 6, top_k))))
     discovered: dict[tuple[str, ...], CandidatePath] = {}
     for seed in seeds:
         _dfs(
@@ -50,9 +51,9 @@ def search_candidate_paths(
 
     results = list(discovered.values())
     results.sort(key=lambda item: (-len(item.stage_coverage), len(item.process_chain), item.path_id))
-    trimmed = results[:top_k]
+    trimmed = results[:pre_rank_limit]
     for index, item in enumerate(trimmed):
-        item.path_id = f"{task_id}_path_{index + 1:03d}"
+        item.path_id = f"{task_id}_candidate_{index + 1:03d}"
     return trimmed
 
 
