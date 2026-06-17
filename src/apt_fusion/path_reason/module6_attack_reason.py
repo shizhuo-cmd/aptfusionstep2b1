@@ -77,6 +77,20 @@ _TECHNIQUE_NAME_BY_ID = {
     "T1204.002": "Malicious File",
 }
 _WEB_C2_PORTS = {"80", "443", "8080", "8443"}
+_STRONG_EXEC_FAMILY_TAGS = {
+    "short_lived_precursor",
+    "attachment_or_tcexec_exec",
+    "initial_or_drop_exec",
+}
+_STRONG_EXEC_LABELS = {
+    "A_BRIDGED_BY_SUSPICIOUS_OBJECT",
+    "B_EXEC_SUSPECT_WRITTEN",
+    "B_EXEC_DOWNLOADED",
+    "B_EXEC_UPLOADED",
+    "B_EXEC_TEMP",
+    "B_SHELL_SPAWN",
+    "B_SCRIPT_EXEC",
+}
 _BEHAVIOR_TACTIC_ALLOWLIST = {
     "download_and_exec": {"TA0011", "TA0002"},
     "credential_read": {"TA0006", "TA0009"},
@@ -641,6 +655,54 @@ def _claim_timeline_items(dossier: dict[str, Any], claim: dict[str, Any]) -> lis
     return output
 
 
+def _dossier_family_tags(dossier: dict[str, Any]) -> set[str]:
+    return {
+        str(value).strip()
+        for value in dossier.get("family_tags", []) or []
+        if str(value).strip()
+    }
+
+
+def _dossier_core_process_labels(dossier: dict[str, Any]) -> set[str]:
+    labels: set[str] = set()
+    for process in dossier.get("core_processes", []) or []:
+        if not isinstance(process, dict):
+            continue
+        for value in process.get("labels", []) or []:
+            text = str(value).strip()
+            if text:
+                labels.add(text)
+    return labels
+
+
+def _timeline_position_by_event_id(dossier: dict[str, Any]) -> dict[str, int]:
+    positions: dict[str, int] = {}
+    for index, item in enumerate(dossier.get("evidence_timeline", []) or []):
+        if not isinstance(item, dict):
+            continue
+        event_id = str(item.get("event_id", "")).strip()
+        if event_id and event_id not in positions:
+            positions[event_id] = index
+    return positions
+
+
+def _dossier_has_ordered_signal_flow(dossier: dict[str, Any], earlier_ids: list[str], later_ids: list[str]) -> bool:
+    positions = _timeline_position_by_event_id(dossier)
+    earlier_positions = [positions[event_id] for event_id in earlier_ids if event_id in positions]
+    later_positions = [positions[event_id] for event_id in later_ids if event_id in positions]
+    return bool(earlier_positions and later_positions and any(src < dst for src in earlier_positions for dst in later_positions))
+
+
+def _dossier_has_strong_exec_context(dossier: dict[str, Any], labels: set[str]) -> bool:
+    family_tags = _dossier_family_tags(dossier)
+    core_labels = _dossier_core_process_labels(dossier)
+    if labels.intersection(_STRONG_EXEC_LABELS):
+        return True
+    if core_labels.intersection(_STRONG_EXEC_LABELS):
+        return True
+    return bool(family_tags.intersection(_STRONG_EXEC_FAMILY_TAGS))
+
+
 def _remote_ports_from_items(items: list[dict[str, Any]]) -> list[str]:
     ports: list[str] = []
     for item in items:
@@ -696,6 +758,7 @@ def _claim_has_required_signal(claim: dict[str, Any], dossier: dict[str, Any]) -
         if str(event.get("event_type", "")).strip()
     }
     bridge_ids = set(_bridge_event_ids_for_exec(dossier))
+    strong_exec_context = _dossier_has_strong_exec_context(dossier, labels)
     statement_blob = " ".join(
         [
             str(claim.get("statement", "")).strip().lower(),
@@ -718,15 +781,15 @@ def _claim_has_required_signal(claim: dict[str, Any], dossier: dict[str, Any]) -
     if behavior in {"shell_exec", "interpreter_precursor_chain"}:
         return any(term in statement_blob for term in ("bash", "shell", "python", "perl", "php", "tcexec", "command-not-found"))
     if behavior == "cnc_communication":
-        return ("B_EXTERNAL_SEND" in labels or "B_EXTERNAL_RECV" in labels) or (
+        return strong_exec_context and (("B_EXTERNAL_SEND" in labels or "B_EXTERNAL_RECV" in labels) or (
             "external_ip" in object_classes and any(event_type in {"SEND", "CONNECT", "RECV"} for event_type in event_types)
-        )
+        ))
     if behavior == "sudo_exec":
         return "sudo" in statement_blob
     if behavior == "switch_su":
         return any(term in statement_blob for term in ("setuid", " su ", "switch user"))
     if behavior == "sensitive_read":
-        return bool(labels.intersection({"B_READ_CRED", "B_READ_HISTORY", "B_READ_BUSINESS", "B_MASS_FILE_ACCESS"}))
+        return strong_exec_context and bool(labels.intersection({"B_READ_CRED", "B_READ_HISTORY", "B_READ_BUSINESS", "B_MASS_FILE_ACCESS"}))
     if behavior == "sensitive_command":
         return any(
             term in statement_blob for term in ("whoami", "hostname", "netstat", "ifconfig", "uname", "system information", "enumeration")
@@ -736,8 +799,20 @@ def _claim_has_required_signal(claim: dict[str, Any], dossier: dict[str, Any]) -
     if behavior == "send_internal":
         return "internal_ip" in object_classes or "B_LATERAL_CONNECT" in labels
     if behavior == "sensitive_leak":
-        return ("B_EXTERNAL_SEND" in labels or "external_ip" in object_classes) and bool(
+        return strong_exec_context and ("B_EXTERNAL_SEND" in labels or "external_ip" in object_classes) and bool(
             labels.intersection({"B_READ_CRED", "B_READ_HISTORY", "B_READ_BUSINESS", "B_MASS_FILE_ACCESS"})
+        ) and _dossier_has_ordered_signal_flow(
+            dossier,
+            [
+                str(value).strip()
+                for value in claim.get("evidence_event_ids", [])
+                if str(value).strip() and str(value).strip() not in {str(event.get("event_id", "")).strip() for event in events if "B_EXTERNAL_SEND" in {str(label).strip() for label in event.get("labels_triggered", []) or [] if str(label).strip()}}
+            ],
+            [
+                str(event.get("event_id", "")).strip()
+                for event in events
+                if "B_EXTERNAL_SEND" in {str(label).strip() for label in event.get("labels_triggered", []) or [] if str(label).strip()}
+            ],
         )
     if behavior in {"clear_logs", "sensitive_temp_rm", "untrusted_file_rm"}:
         return "B_DELETE_LOG" in labels or any(event_type in {"DELETE", "UNLINK", "RENAME"} for event_type in event_types)

@@ -180,6 +180,20 @@ HOLMES_QUERY_TERMS = {
 _RECON_COMMAND_MARKERS = ("whoami", "hostname", "uname", "ifconfig", "ip addr", "netstat", "ss ", "ps ", "id ")
 _ATTACHMENT_MARKERS = ("tcexec", "pine", "rimapd", "attachment", "mail")
 _PRECURSOR_MARKERS = ("tcexec", "command-not-found", "/dev/pts/3", "python3", "chmod", "bash")
+_STRONG_EXEC_FAMILY_TAGS = {
+    "short_lived_precursor",
+    "attachment_or_tcexec_exec",
+    "initial_or_drop_exec",
+}
+_STRONG_EXEC_LABELS = {
+    "A_BRIDGED_BY_SUSPICIOUS_OBJECT",
+    "B_EXEC_SUSPECT_WRITTEN",
+    "B_EXEC_DOWNLOADED",
+    "B_EXEC_UPLOADED",
+    "B_EXEC_TEMP",
+    "B_SHELL_SPAWN",
+    "B_SCRIPT_EXEC",
+}
 
 
 def _normalize_text(value: Any) -> str:
@@ -252,6 +266,14 @@ def _core_process_labels(dossier: dict[str, Any]) -> set[str]:
     return output
 
 
+def _dossier_family_tags(dossier: dict[str, Any]) -> set[str]:
+    return {
+        str(value).strip()
+        for value in dossier.get("family_tags", []) or []
+        if str(value).strip()
+    }
+
+
 def _text_blob(dossier: dict[str, Any]) -> str:
     parts: list[str] = []
     for item in dossier.get("evidence_timeline", []) or []:
@@ -293,6 +315,44 @@ def _bridge_exec_event_ids(dossier: dict[str, Any]) -> list[str]:
             if event_id and event_id not in output:
                 output.append(event_id)
     return output
+
+
+def _timeline_position_by_id(dossier: dict[str, Any]) -> dict[str, int]:
+    positions: dict[str, int] = {}
+    for index, item in enumerate(dossier.get("evidence_timeline", []) or []):
+        if not isinstance(item, dict):
+            continue
+        event_id = str(item.get("event_id", "")).strip()
+        if event_id and event_id not in positions:
+            positions[event_id] = index
+    return positions
+
+
+def _has_ordered_signal_flow(dossier: dict[str, Any], earlier_ids: list[str], later_ids: list[str]) -> bool:
+    positions = _timeline_position_by_id(dossier)
+    earlier_positions = [positions[event_id] for event_id in earlier_ids if event_id in positions]
+    later_positions = [positions[event_id] for event_id in later_ids if event_id in positions]
+    return bool(earlier_positions and later_positions and any(src < dst for src in earlier_positions for dst in later_positions))
+
+
+def _has_strong_exec_context(
+    dossier: dict[str, Any],
+    *,
+    labels: set[str],
+    exec_ids: list[str],
+    bridge_exec_ids: list[str],
+    attachment_ids: list[str],
+    shell_exec_ids: list[str],
+    precursor_ids: list[str],
+) -> bool:
+    family_tags = _dossier_family_tags(dossier)
+    if bridge_exec_ids or attachment_ids or shell_exec_ids or precursor_ids:
+        return True
+    if labels.intersection(_STRONG_EXEC_LABELS):
+        return True
+    if family_tags.intersection(_STRONG_EXEC_FAMILY_TAGS):
+        return True
+    return bool(exec_ids and family_tags.intersection({"callback_c2", "cleanup_delete", *tuple(_STRONG_EXEC_FAMILY_TAGS)}))
 
 
 def _candidate_precursor_ids(dossier: dict[str, Any], blob: str) -> list[str]:
@@ -386,6 +446,15 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
             lambda item: any(marker in _normalize_text(item.get("description", "")) for marker in ("bash", "sh ", "python", "perl", "php", "tcexec", "command-not-found")),
         )
     )
+    strong_exec_context = _has_strong_exec_context(
+        dossier,
+        labels=labels,
+        exec_ids=exec_ids,
+        bridge_exec_ids=bridge_exec_ids,
+        attachment_ids=attachment_ids,
+        shell_exec_ids=shell_exec_ids,
+        precursor_ids=precursor_ids,
+    )
     sudo_ids = _event_ids_from_items(
         _timeline_items_for_predicate(
             dossier,
@@ -441,13 +510,13 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
         add_claim("attachment_user_exec", attachment_ids + bridge_exec_ids, 0.82, ["attachment_markers"])
     if shell_exec_ids:
         add_claim("shell_exec", shell_exec_ids + precursor_ids[:4], 0.78, ["interpreter_exec"])
-    if external_send_ids or (external_recv_ids and "network_support_summary" in dossier):
+    if (external_send_ids or external_recv_ids) and strong_exec_context:
         add_claim("cnc_communication", external_send_ids + external_recv_ids, 0.8, ["external_c2"])
     if sudo_ids:
         add_claim("sudo_exec", sudo_ids, 0.8, ["sudo"])
     if su_ids:
         add_claim("switch_su", su_ids, 0.8, ["identity_switch"])
-    if sensitive_ids or history_ids or business_ids:
+    if (sensitive_ids or history_ids or business_ids) and strong_exec_context:
         add_claim("sensitive_read", sensitive_ids + history_ids + business_ids, 0.82, ["sensitive_local_read"])
     if recon_command_ids:
         add_claim("sensitive_command", recon_command_ids, 0.78, ["recon_commands"])
@@ -455,7 +524,12 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
         add_claim("network_service_discovery", scan_ids + lateral_ids, 0.82, ["scan_burst"])
     if internal_send_ids:
         add_claim("send_internal", internal_send_ids, 0.76, ["internal_connect"])
-    if external_send_ids and (sensitive_ids or business_ids or history_ids):
+    if (
+        external_send_ids
+        and (sensitive_ids or business_ids or history_ids)
+        and strong_exec_context
+        and _has_ordered_signal_flow(dossier, sensitive_ids + business_ids + history_ids, external_send_ids)
+    ):
         add_claim("sensitive_leak", external_send_ids + sensitive_ids + business_ids + history_ids, 0.83, ["sensitive_plus_external_send"])
     if log_delete_ids:
         add_claim("clear_logs", log_delete_ids, 0.82, ["log_cleanup"])
@@ -475,8 +549,8 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
         "cnc_communication": ("untrusted_file_exec", "attachment_user_exec", "shell_exec", "interpreter_precursor_chain"),
         "sudo_exec": ("shell_exec",),
         "switch_su": ("shell_exec",),
-        "sensitive_read": ("untrusted_file_exec", "shell_exec", "cnc_communication", "interpreter_precursor_chain"),
-        "sensitive_command": ("untrusted_file_exec", "shell_exec", "cnc_communication", "interpreter_precursor_chain"),
+        "sensitive_read": ("untrusted_file_exec", "shell_exec", "interpreter_precursor_chain"),
+        "sensitive_command": ("untrusted_file_exec", "shell_exec", "interpreter_precursor_chain"),
         "network_service_discovery": ("shell_exec", "cnc_communication", "attachment_user_exec"),
         "send_internal": ("shell_exec", "cnc_communication"),
         "sensitive_leak": ("sensitive_read", "cnc_communication"),

@@ -26,6 +26,8 @@ from apt_fusion.path_reason.log_stream import (
     _iter_log_files,
 )
 
+DEFAULT_CADETS_GT_TIME_OFFSET_MINUTES = 240
+
 
 def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -86,16 +88,28 @@ def _ranges_overlap(
     return left_start <= right_end and left_end >= right_start
 
 
-def _load_confirmed_windows(gt_json_path: Path) -> list[Any]:
-    strict_windows, _, metadata = load_gt_reference(gt_json_path, host_filter="CADETS")
+def _resolve_cadets_gt_offset_minutes(metadata: dict[str, Any]) -> tuple[int, str]:
     offsets = metadata.get("recommended_gt_time_offset_minutes_by_host", {})
-    if isinstance(offsets, dict):
-        offset = offsets.get("CADETS")
-        if offset:
-            apply_gt_time_offset(strict_windows, minutes=int(offset))
+    if isinstance(offsets, dict) and "CADETS" in offsets:
+        try:
+            return int(offsets["CADETS"]), "metadata"
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_CADETS_GT_TIME_OFFSET_MINUTES, "default_cadets_plus_4h"
+
+
+def _load_confirmed_windows(gt_json_path: Path) -> tuple[list[Any], dict[str, Any]]:
+    strict_windows, _, metadata = load_gt_reference(gt_json_path, host_filter="CADETS")
+    offset_minutes, offset_source = _resolve_cadets_gt_offset_minutes(metadata)
+    if offset_minutes:
+        apply_gt_time_offset(strict_windows, minutes=offset_minutes)
     windows = [item for item in strict_windows if str(item.status).strip().lower() == "confirmed"]
     windows.sort(key=lambda item: (_as_naive_utc(item.start_time) or datetime.min, str(item.window_id)))
-    return windows
+    return windows, {
+        "host": "CADETS",
+        "applied_offset_minutes": int(offset_minutes),
+        "offset_source": offset_source,
+    }
 
 
 def _load_malicious_uuid_set(gt_node_path: Path) -> set[str]:
@@ -674,7 +688,7 @@ def run_cadets_eventid_fix_diagnostics(
     output_dir = artifacts_root / "cadets_eventid_fix_diagnostics"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    windows = _load_confirmed_windows(gt_json_path)
+    windows, offset_info = _load_confirmed_windows(gt_json_path)
     malicious_uuids = _load_malicious_uuid_set(gt_node_path)
     gt_processes_by_window, raw_meta_by_window = _scan_window_gt_processes(source_logs, windows, malicious_uuids)
     task_records = _load_task_records(artifacts_root)
@@ -811,6 +825,7 @@ def run_cadets_eventid_fix_diagnostics(
             "gt_node_path": str(gt_node_path),
             "source_logs": str(source_logs),
             "gt_json_path": str(gt_json_path),
+            "gt_time_alignment": offset_info,
             "coverage_overall": overall,
             "outputs": outputs,
         },
