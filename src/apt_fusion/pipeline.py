@@ -52,6 +52,7 @@ def run_pipeline(cfg: FusionConfig, stage: str) -> Dict[str, str]:
     outputs: Dict[str, str] = {}
     module1_outputs = _default_module1_paths(cfg)
     module2_outputs = _default_module2_paths(cfg)
+    module3_gt_direct = str(cfg.module3_task_selection_mode).strip() == "module1_ground_truth_positive_base_only"
 
     if stage == "full_path_reason":
         print(PATH_REASON_PIPELINE_MESSAGE)
@@ -64,7 +65,7 @@ def run_pipeline(cfg: FusionConfig, stage: str) -> Dict[str, str]:
         module1_outputs = run_module1(cfg)
         outputs.update({f"module1.{k}": str(v) for k, v in module1_outputs.items()})
 
-    if stage in {"module2", "full_path_reason"}:
+    if stage in {"module2", "full_path_reason"} and not (stage == "full_path_reason" and module3_gt_direct):
         out = run_module2(
             cfg=cfg,
             embeddings_path=module1_outputs["process_embeddings"],
@@ -75,12 +76,15 @@ def run_pipeline(cfg: FusionConfig, stage: str) -> Dict[str, str]:
         outputs.update({f"module2.{k}": str(v) for k, v in out.items()})
 
     if stage in {"module3_evidence", "module4_compact", "module5_paths", "module6_reason", "full_path_reason"}:
-        out = run_module3_evidence(
-            cfg,
-            suspicious_tasks_path=module2_outputs["suspicious_tasks"],
-            task_meta_rich_path=cfg.module2_dir / "task_meta_rich.json",
-            task_attribution_path=cfg.module2_dir / "task_attribution.json",
-        )
+        if module3_gt_direct:
+            out = run_module3_evidence(cfg)
+        else:
+            out = run_module3_evidence(
+                cfg,
+                suspicious_tasks_path=module2_outputs["suspicious_tasks"],
+                task_meta_rich_path=cfg.module2_dir / "task_meta_rich.json",
+                task_attribution_path=cfg.module2_dir / "task_attribution.json",
+            )
         outputs.update({f"module3_evidence.{k}": str(v) for k, v in out.items()})
 
     if stage in {"module4_compact", "module5_paths", "module6_reason", "full_path_reason"}:

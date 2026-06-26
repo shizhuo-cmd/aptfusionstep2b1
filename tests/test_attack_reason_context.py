@@ -8,6 +8,7 @@ from apt_fusion.config import load_config
 from apt_fusion.path_reason.module6_attack_reason import (
     _apply_behavior_prior_mappings,
     _claim_supports_mapping,
+    _prune_attack_candidates_for_claim_context,
     _render_compact_mapping_context,
     _render_compact_path_dossier,
     _synthetic_bundle_for_attack_kb,
@@ -49,6 +50,9 @@ class AttackReasonContextTests(unittest.TestCase):
                 "version: /tmp/a.sh@v0002 writers=1 readers=0 executors=1",
             ],
             "support_event_ids": ["e1", "e2", "e3"],
+            "service_context_summary": "service_processes=nginx; system_objects=/etc/hosts",
+            "sensitive_object_summary": "weak=/srv/share/customer.csv",
+            "cleanup_object_summary": "staged_cleanup=/tmp/a.sh",
             "core_processes": [
                 {"process_guid": "p1", "name": "nginx", "labels": ["P_WEB_CTX"]},
                 {"process_guid": "p2", "name": "bash", "labels": ["P_UNTRUSTED_CTX"]},
@@ -71,6 +75,9 @@ class AttackReasonContextTests(unittest.TestCase):
                     "event_type": "WRITE",
                     "object_class": "temp_file",
                     "object_key": "/tmp/a.sh",
+                    "object_labels": ["O_FILE_DOWNLOADED"],
+                    "process_guid": "p1",
+                    "process_name": "nginx",
                     "labels_triggered": ["O_FILE_DOWNLOADED"],
                     "description": "nginx WRITE a.sh",
                 }
@@ -82,6 +89,9 @@ class AttackReasonContextTests(unittest.TestCase):
         self.assertIn("PROCESSES", compact)
         self.assertIn("BRIDGES", compact)
         self.assertIn("SUPPORT", compact)
+        self.assertIn("SERVICE_CONTEXT", compact)
+        self.assertIn("SENSITIVE_OBJECTS", compact)
+        self.assertIn("CLEANUP_OBJECTS", compact)
         self.assertIn("chain_kind=entry_exec", compact)
         self.assertIn("contexts=ctx:web,ctx:remote", compact)
         self.assertIn("support_objects=/tmp/a.sh,128.55.12.73:80", compact)
@@ -388,6 +398,60 @@ class AttackReasonContextTests(unittest.TestCase):
         self.assertEqual(mappings, [])
         self.assertEqual(summary["mappings_normalized_to_empty_count"], 1)
         self.assertEqual(summary["kept_mapping_count"], 0)
+
+    def test_browser_credential_submit_context_prunes_candidate_tactics(self) -> None:
+        cfg = SimpleNamespace(attack_mapping_scope="tactics_only")
+        dossier = {
+            "family_tags": ["mail_browser_context_tail", "initial_or_drop_exec"],
+            "core_processes": [{"name": "firefox"}, {"name": "fluxbox"}],
+        }
+        claims = [
+            {"claim_id": "c1", "behavior_type": "credential_submit"},
+            {"claim_id": "c2", "behavior_type": "untrusted_read"},
+            {"claim_id": "c3", "behavior_type": "untrusted_file_exec"},
+        ]
+        attack_candidates = {
+            "tactics": [
+                {"external_id": "TA0001", "name": "Initial Access", "tactic_ids": ["TA0001"]},
+                {"external_id": "TA0002", "name": "Execution", "tactic_ids": ["TA0002"]},
+                {"external_id": "TA0006", "name": "Credential Access", "tactic_ids": ["TA0006"]},
+                {"external_id": "TA0007", "name": "Discovery", "tactic_ids": ["TA0007"]},
+                {"external_id": "TA0003", "name": "Persistence", "tactic_ids": ["TA0003"]},
+            ],
+            "techniques": [
+                {"external_id": "T1110", "name": "Brute Force", "tactic_ids": ["TA0006"]},
+                {"external_id": "T1176.001", "name": "Browser Extensions", "tactic_ids": ["TA0003"]},
+            ],
+        }
+        pruned, reason = _prune_attack_candidates_for_claim_context(cfg, dossier, claims, attack_candidates)
+        self.assertEqual(reason, "browser_credential_submit_context")
+        self.assertEqual(
+            [item["external_id"] for item in pruned["tactics"]],
+            ["TA0001", "TA0002", "TA0006"],
+        )
+        self.assertEqual([item["external_id"] for item in pruned["techniques"]], ["T1110"])
+
+    def test_non_browser_context_does_not_prune_candidate_tactics(self) -> None:
+        cfg = SimpleNamespace(attack_mapping_scope="tactics_only")
+        dossier = {
+            "family_tags": ["initial_or_drop_exec", "callback_c2"],
+            "core_processes": [{"name": "bash"}],
+        }
+        claims = [
+            {"claim_id": "c1", "behavior_type": "credential_submit"},
+            {"claim_id": "c2", "behavior_type": "untrusted_read"},
+            {"claim_id": "c3", "behavior_type": "untrusted_file_exec"},
+        ]
+        attack_candidates = {
+            "tactics": [
+                {"external_id": "TA0001", "name": "Initial Access", "tactic_ids": ["TA0001"]},
+                {"external_id": "TA0007", "name": "Discovery", "tactic_ids": ["TA0007"]},
+            ],
+            "techniques": [],
+        }
+        pruned, reason = _prune_attack_candidates_for_claim_context(cfg, dossier, claims, attack_candidates)
+        self.assertEqual(reason, "")
+        self.assertEqual(pruned, attack_candidates)
 
 
 if __name__ == "__main__":

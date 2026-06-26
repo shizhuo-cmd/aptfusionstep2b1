@@ -2,6 +2,7 @@ import os, json, traceback, sys, re, gc
 sys.dont_write_bytecode = True
 import collections
 import random
+from datetime import datetime, timezone
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 import torch
 import torch.nn as nn
@@ -248,6 +249,62 @@ def load_fix(path):
     return newdict
 
 
+def _to_seconds_like(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        raw = float(value)
+    else:
+        text = str(value).strip()
+        if text == "":
+            return None
+        if re.fullmatch(r"[-+]?\d+(\.\d+)?", text):
+            raw = float(text)
+        else:
+            normalized = text.replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(normalized)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
+            except ValueError:
+                return None
+    digits = len(str(int(abs(raw)))) if raw != 0 else 1
+    if digits >= 18:
+        return raw / 1e9
+    if digits >= 15:
+        return raw / 1e6
+    if digits >= 12:
+        return raw / 1e3
+    return raw
+
+
+def _event_timestamp_seconds(event_data):
+    if not isinstance(event_data, dict):
+        return None
+    return _to_seconds_like(
+        event_data.get('timestampNanos')
+        or event_data.get('timestampMicros')
+        or event_data.get('timestampMillis')
+        or event_data.get('timestamp')
+    )
+
+
+def _update_subject_time_range(subject_time_ranges, subject_uuid, timestamp_sec):
+    if subject_uuid in (None, "") or timestamp_sec is None:
+        return
+    key = str(subject_uuid)
+    current = subject_time_ranges.get(key)
+    if current is None:
+        subject_time_ranges[key] = [float(timestamp_sec), float(timestamp_sec), 1]
+        return
+    if timestamp_sec < current[0]:
+        current[0] = float(timestamp_sec)
+    if timestamp_sec > current[1]:
+        current[1] = float(timestamp_sec)
+    current[2] = int(current[2]) + 1
+
+
 def encode_cadets(sub_list, obj_list, event_list):
     sys_path_dict = load_fix('./data/linux_system_path.txt')
     file_type_dict = load_fix('./data/linux_file_type.txt')
@@ -423,6 +480,7 @@ def filters(
     events_seen = {}
     objvec = {}
     subjhistory = {}
+    raw_subject_time_ranges = {}
     tgiddict = {}
     subjswap = {}
     subject_seen = set()
@@ -434,12 +492,19 @@ def filters(
             for line in f:
                 js = json.loads(line)
                 if 'com.bbn.tc.schema.avro.cdm18.Event' in js['datum']:
-                    event_type = js['datum']['com.bbn.tc.schema.avro.cdm18.Event']['type']
+                    event_data = js['datum']['com.bbn.tc.schema.avro.cdm18.Event']
+                    subject_ref = event_data.get('subject', {})
+                    if isinstance(subject_ref, dict):
+                        _update_subject_time_range(
+                            raw_subject_time_ranges,
+                            subject_ref.get('com.bbn.tc.schema.avro.cdm18.UUID'),
+                            _event_timestamp_seconds(event_data),
+                        )
+                    event_type = event_data['type']
                     if event_type in aimevetype:
                         eveid = aimevetype[event_type]
-                        subject_uuid = js['datum']['com.bbn.tc.schema.avro.cdm18.Event']['subject'][
-                            'com.bbn.tc.schema.avro.cdm18.UUID']
-                        object_uuid = js['datum']['com.bbn.tc.schema.avro.cdm18.Event']['predicateObject'][
+                        subject_uuid = event_data['subject']['com.bbn.tc.schema.avro.cdm18.UUID']
+                        object_uuid = event_data['predicateObject'][
                             'com.bbn.tc.schema.avro.cdm18.UUID']
                         if subject_uuid in subjswap.keys():
                             subject_uuid = subjswap[subject_uuid]
@@ -595,6 +660,25 @@ def filters(
     else:
         task_component_diagnostics = []
 
+    canonical_subject_time_ranges = None
+    if return_task_components:
+        canonical_subject_time_ranges = {}
+        for raw_uuid, value in raw_subject_time_ranges.items():
+            canonical_uuid = subjswap.get(raw_uuid, raw_uuid)
+            current = canonical_subject_time_ranges.get(canonical_uuid)
+            if current is None:
+                canonical_subject_time_ranges[canonical_uuid] = [
+                    float(value[0]),
+                    float(value[1]),
+                    int(value[2]),
+                ]
+            else:
+                if value[0] < current[0]:
+                    current[0] = float(value[0])
+                if value[1] > current[1]:
+                    current[1] = float(value[1])
+                current[2] = int(current[2]) + int(value[2])
+
     del tgiddict
     del subjswap
     del chdict
@@ -607,7 +691,7 @@ def filters(
         if event[1] in subjhistory:
             subjhistory[event[1]].append(evevec)
         else:
-            subjhistory[event[1]] = []
+            subjhistory[event[1]] = [evevec]
 
     del events_seen
     del objvec
@@ -655,6 +739,14 @@ def filters(
             'split_mode': str(split_mode),
             'count_segmented_children_upstream': bool(count_segmented_children_upstream),
             'task_component_diagnostics': task_component_diagnostics,
+            'subject_time_ranges': {
+                str(subject_uuid): {
+                    'first_timestamp_sec': float(value[0]),
+                    'last_timestamp_sec': float(value[1]),
+                    'event_count': int(value[2]),
+                }
+                for subject_uuid, value in (canonical_subject_time_ranges or {}).items()
+            },
         }, subjhisvec
     return chi_pa, subjhisvec
 

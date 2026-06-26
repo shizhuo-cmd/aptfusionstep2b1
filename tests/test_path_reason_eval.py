@@ -10,7 +10,9 @@ from apt_fusion.evaluation.path_reason_eval import (
     GTWindow,
     PredictedPath,
     apply_gt_time_offset,
+    assign_paths_to_windows,
     build_gt_reference,
+    evaluate_path_reason,
     load_gt_reference,
     parse_gt_windows_strict,
     time_match_for_window,
@@ -18,6 +20,9 @@ from apt_fusion.evaluation.path_reason_eval import (
 
 
 class PathReasonEvalTests(unittest.TestCase):
+    def _temp_dir(self) -> str:
+        return str(Path(tempfile.gettempdir()))
+
     def test_strict_markdown_parser_splits_confirmed_and_attempted(self) -> None:
         markdown = """# 3. TRACE
 
@@ -44,7 +49,7 @@ class PathReasonEvalTests(unittest.TestCase):
             encoding="utf-8",
             suffix="_path_reason_eval_strict.md",
             delete=False,
-            dir="D:/daima/APT-Fusionstep2b1",
+            dir=self._temp_dir(),
         ) as handle:
             handle.write(markdown)
             temp_name = handle.name
@@ -155,6 +160,49 @@ class PathReasonEvalTests(unittest.TestCase):
         self.assertFalse(partial_match.strict_time_match)
         self.assertFalse(off_match.primary_time_match)
 
+    def test_point_event_inside_window_is_not_marked_off_window(self) -> None:
+        window = GTWindow(
+            window_id="THEIA_01",
+            host="THEIA",
+            source_doc="strict.md",
+            source_ref="point",
+            status="confirmed",
+            time_precision="minute_window",
+            start_time=datetime.fromisoformat("2018-04-10T17:41:00"),
+            end_time=datetime.fromisoformat("2018-04-10T18:55:00"),
+            confirmed_techniques=[],
+            attempted_techniques=[],
+            confirmed_tactics=["COMMAND_AND_CONTROL"],
+            attempted_tactics=[],
+            coarse_chain_tags=[],
+            notes="",
+            broad_techniques=[],
+        )
+        point_path = PredictedPath(
+            host="THEIA",
+            task_id="task_point",
+            path_id="task_point_path_001",
+            risk_score=70.0,
+            risk_level="HIGH",
+            start_time=datetime.fromisoformat("2018-04-10T18:11:15"),
+            end_time=datetime.fromisoformat("2018-04-10T18:11:15"),
+            stage_coverage=["Entry"],
+            process_chain=["gconf-helper"],
+            bridge_objects=[],
+            candidate_tactics=["COMMAND_AND_CONTROL"],
+            predicted_tactics=["COMMAND_AND_CONTROL"],
+            predicted_techniques=[],
+            attack_mapping_scope="tactics_only",
+            warnings=[],
+            candidate_paths_path="",
+            report_path="",
+        )
+        match = time_match_for_window(point_path, window, pad_minutes=5, near_miss_minutes=5)
+        self.assertTrue(match.strict_time_match)
+        self.assertTrue(match.primary_time_match)
+        self.assertTrue(match.loose_time_match)
+        self.assertGreaterEqual(match.path_in_window_ratio, 1.0)
+
     def test_gt_reference_roundtrip_filters_by_host(self) -> None:
         windows = [
             GTWindow(
@@ -207,7 +255,7 @@ class PathReasonEvalTests(unittest.TestCase):
             encoding="utf-8",
             suffix="_path_reason_eval_gt.json",
             delete=False,
-            dir="D:/daima/APT-Fusionstep2b1",
+            dir=self._temp_dir(),
         ) as handle:
             handle.write(__import__("json").dumps(reference, ensure_ascii=False, indent=2))
             temp_name = handle.name
@@ -248,6 +296,217 @@ class PathReasonEvalTests(unittest.TestCase):
         apply_gt_time_offset([window], minutes=240)
         self.assertEqual(window.start_time, datetime.fromisoformat("2018-04-13T16:43:00"))
         self.assertEqual(window.end_time, datetime.fromisoformat("2018-04-13T16:53:00"))
+
+    def test_confirmed_window_uses_unique_assigned_paths_for_tactic_union(self) -> None:
+        broad = GTWindow(
+            window_id="THEIA_BROAD",
+            host="THEIA",
+            source_doc="strict.md",
+            source_ref="broad",
+            status="confirmed",
+            time_precision="minute_window",
+            start_time=datetime.fromisoformat("2018-04-10T13:41:00"),
+            end_time=datetime.fromisoformat("2018-04-10T14:55:00"),
+            confirmed_techniques=[],
+            attempted_techniques=[],
+            confirmed_tactics=["INITIAL_ACCESS", "EXECUTION", "PRIVILEGE_ESCALATION"],
+            attempted_tactics=[],
+            coarse_chain_tags=[],
+            notes="",
+            broad_techniques=[],
+        )
+        nested = GTWindow(
+            window_id="THEIA_NESTED",
+            host="THEIA",
+            source_doc="strict.md",
+            source_ref="nested",
+            status="confirmed",
+            time_precision="minute_window",
+            start_time=datetime.fromisoformat("2018-04-10T13:42:00"),
+            end_time=datetime.fromisoformat("2018-04-10T13:44:00"),
+            confirmed_techniques=[],
+            attempted_techniques=[],
+            confirmed_tactics=["INITIAL_ACCESS", "EXECUTION", "CREDENTIAL_ACCESS"],
+            attempted_tactics=[],
+            coarse_chain_tags=[],
+            notes="",
+            broad_techniques=[],
+        )
+        broad_path = PredictedPath(
+            host="THEIA",
+            task_id="task_broad",
+            path_id="task_broad_path_001",
+            risk_score=80.0,
+            risk_level="HIGH",
+            start_time=datetime.fromisoformat("2018-04-10T14:10:00"),
+            end_time=datetime.fromisoformat("2018-04-10T14:20:00"),
+            stage_coverage=["Entry"],
+            process_chain=["payload"],
+            bridge_objects=[],
+            candidate_tactics=["EXECUTION", "PRIVILEGE_ESCALATION"],
+            predicted_tactics=["EXECUTION", "PRIVILEGE_ESCALATION"],
+            predicted_techniques=[],
+            attack_mapping_scope="tactics_only",
+            warnings=[],
+            candidate_paths_path="",
+            report_path="",
+        )
+        nested_path = PredictedPath(
+            host="THEIA",
+            task_id="task_nested",
+            path_id="task_nested_path_001",
+            risk_score=70.0,
+            risk_level="HIGH",
+            start_time=datetime.fromisoformat("2018-04-10T13:42:10"),
+            end_time=datetime.fromisoformat("2018-04-10T13:43:20"),
+            stage_coverage=["Entry"],
+            process_chain=["browser"],
+            bridge_objects=[],
+            candidate_tactics=["INITIAL_ACCESS", "EXECUTION", "CREDENTIAL_ACCESS"],
+            predicted_tactics=["INITIAL_ACCESS", "EXECUTION", "CREDENTIAL_ACCESS"],
+            predicted_techniques=[],
+            attack_mapping_scope="tactics_only",
+            warnings=[],
+            candidate_paths_path="",
+            report_path="",
+        )
+        predicted_paths = [broad_path, nested_path]
+        assignments = assign_paths_to_windows(
+            predicted_paths,
+            [broad, nested],
+            pad_minutes=5,
+            near_miss_minutes=5,
+        )
+        assignment_by_path = {str(item["path_id"]): item for item in assignments}
+        self.assertEqual(assignment_by_path["task_nested_path_001"]["assigned_window_id"], "THEIA_NESTED")
+        self.assertEqual(assignment_by_path["task_nested_path_001"]["match_type"], "CONFIRMED_MATCH")
+        summary, _window_level, _technique_cmp, tactic_cmp, candidate_cov = evaluate_path_reason(
+            strict_windows=[broad, nested],
+            predicted_paths=predicted_paths,
+            path_assignments=assignments,
+            match_top_n=5,
+            pad_minutes=5,
+            near_miss_minutes=5,
+        )
+        self.assertEqual(summary["confirmed_window_recall"], 1.0)
+        tactic_by_window = {str(item["window_id"]): item for item in tactic_cmp}
+        coverage_by_window = {str(item["window_id"]): item for item in candidate_cov}
+        self.assertEqual(
+            tactic_by_window["THEIA_BROAD"]["predicted_tactics_union_top_n"],
+            ["EXECUTION", "PRIVILEGE_ESCALATION"],
+        )
+        self.assertEqual(
+            coverage_by_window["THEIA_BROAD"]["candidate_tactics_union_top_n"],
+            ["EXECUTION", "PRIVILEGE_ESCALATION"],
+        )
+        self.assertEqual(
+            tactic_by_window["THEIA_NESTED"]["predicted_tactics_union_top_n"],
+            ["INITIAL_ACCESS", "EXECUTION", "CREDENTIAL_ACCESS"],
+        )
+
+    def test_off_window_suffix_is_reattached_as_confirmed_continuation(self) -> None:
+        window = GTWindow(
+            window_id="THEIA_CHAIN",
+            host="THEIA",
+            source_doc="strict.md",
+            source_ref="chain",
+            status="confirmed",
+            time_precision="minute_window",
+            start_time=datetime.fromisoformat("2018-04-10T17:41:00"),
+            end_time=datetime.fromisoformat("2018-04-10T18:55:00"),
+            confirmed_techniques=[],
+            attempted_techniques=[],
+            confirmed_tactics=["INITIAL_ACCESS", "EXECUTION", "COMMAND_AND_CONTROL", "PRIVILEGE_ESCALATION"],
+            attempted_tactics=[],
+            coarse_chain_tags=[],
+            notes="",
+            broad_techniques=[],
+        )
+        anchor = PredictedPath(
+            host="THEIA",
+            task_id="task_chain",
+            path_id="task_chain_path_001",
+            risk_score=250.0,
+            risk_level="HIGH",
+            start_time=datetime.fromisoformat("2018-04-10T18:44:27"),
+            end_time=datetime.fromisoformat("2018-04-10T19:06:58"),
+            stage_coverage=["Entry", "ExecutionStrong", "FollowUp"],
+            process_chain=["payload_parent", "payload_child", "/home/admin/profile"],
+            bridge_objects=["FILE_OBJECT_BLOCK"],
+            candidate_tactics=["EXECUTION", "COMMAND_AND_CONTROL", "DISCOVERY", "INITIAL_ACCESS", "PRIVILEGE_ESCALATION"],
+            predicted_tactics=["EXECUTION", "COMMAND_AND_CONTROL", "DISCOVERY", "INITIAL_ACCESS", "PRIVILEGE_ESCALATION"],
+            predicted_techniques=[],
+            attack_mapping_scope="tactics_only",
+            warnings=[],
+            candidate_paths_path="",
+            report_path="",
+        )
+        suffix = PredictedPath(
+            host="THEIA",
+            task_id="task_chain",
+            path_id="task_chain_path_003",
+            risk_score=206.5,
+            risk_level="HIGH",
+            start_time=datetime.fromisoformat("2018-04-10T18:56:39"),
+            end_time=datetime.fromisoformat("2018-04-10T19:06:58"),
+            stage_coverage=["Entry", "ExecutionStrong", "FollowUp"],
+            process_chain=["payload_child", "/home/admin/profile"],
+            bridge_objects=[],
+            candidate_tactics=["INITIAL_ACCESS", "COMMAND_AND_CONTROL", "PRIVILEGE_ESCALATION", "EXECUTION"],
+            predicted_tactics=["COMMAND_AND_CONTROL", "PRIVILEGE_ESCALATION"],
+            predicted_techniques=[],
+            attack_mapping_scope="tactics_only",
+            warnings=[],
+            candidate_paths_path="",
+            report_path="",
+        )
+        unrelated = PredictedPath(
+            host="THEIA",
+            task_id="task_other",
+            path_id="task_other_path_001",
+            risk_score=190.0,
+            risk_level="HIGH",
+            start_time=datetime.fromisoformat("2018-04-10T19:20:00"),
+            end_time=datetime.fromisoformat("2018-04-10T19:25:00"),
+            stage_coverage=["Entry"],
+            process_chain=["other_process"],
+            bridge_objects=[],
+            candidate_tactics=["COMMAND_AND_CONTROL"],
+            predicted_tactics=["COMMAND_AND_CONTROL"],
+            predicted_techniques=[],
+            attack_mapping_scope="tactics_only",
+            warnings=[],
+            candidate_paths_path="",
+            report_path="",
+        )
+        assignments = assign_paths_to_windows(
+            [anchor, suffix, unrelated],
+            [window],
+            pad_minutes=5,
+            near_miss_minutes=5,
+        )
+        by_path = {str(item["path_id"]): item for item in assignments}
+        self.assertEqual(by_path["task_chain_path_001"]["assigned_status"], "CONFIRMED_MATCH")
+        self.assertEqual(by_path["task_chain_path_003"]["assigned_status"], "CONFIRMED_CONTINUATION")
+        self.assertEqual(by_path["task_chain_path_003"]["assigned_window_id"], "THEIA_CHAIN")
+        self.assertFalse(by_path["task_chain_path_003"]["primary_time_match"])
+        self.assertEqual(by_path["task_chain_path_003"]["continuation_anchor_path_id"], "task_chain_path_001")
+        self.assertEqual(by_path["task_other_path_001"]["assigned_status"], "OFF_WINDOW")
+        summary, window_level, _technique_cmp, tactic_cmp, _candidate_cov = evaluate_path_reason(
+            strict_windows=[window],
+            predicted_paths=[anchor, suffix, unrelated],
+            path_assignments=assignments,
+            match_top_n=5,
+            pad_minutes=5,
+            near_miss_minutes=5,
+        )
+        self.assertEqual(summary["confirmed_window_recall"], 1.0)
+        self.assertEqual(summary["off_window_high_risk_count"], 1)
+        by_window = {str(item["window_id"]): item for item in tactic_cmp}
+        self.assertEqual(
+            by_window["THEIA_CHAIN"]["predicted_tactics_union_top_n"],
+            ["EXECUTION", "COMMAND_AND_CONTROL", "DISCOVERY", "INITIAL_ACCESS", "PRIVILEGE_ESCALATION"],
+        )
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from apt_fusion.common import iter_jsonl
-from apt_fusion.config import FusionConfig, load_config
+from apt_fusion.config import FusionConfig, load_config, resolve_attack_eval_gt_json
 from apt_fusion.evaluation.path_reason_eval import (
     _canonical_tactic_name,
     apply_gt_time_offset,
@@ -33,7 +33,7 @@ from apt_fusion.task_detection.module2_online_detection import run_module2
 
 LOCAL_REPO_ROOT = Path(r"D:\daima\APT-Fusionstep2b1")
 REMOTE_REPO_ROOT = Path("/root/autodl-tmp/APT-Fusionstep2b1")
-GT_JSON_PATH = REMOTE_REPO_ROOT / "docs" / "darpa_attack_eval_ground_truth_2026-05-26.json"
+GT_JSON_PATH = resolve_attack_eval_gt_json(REMOTE_REPO_ROOT)
 CADETS_LOGS_RAR = Path("/root/autodl-tmp/data/cadets/logs.rar")
 CADETS_LOGS_DIR = Path("/root/autodl-tmp/data/cadets/logs")
 EVAL_DIR_NAME = "path_reason_eval_tactics_only_llm"

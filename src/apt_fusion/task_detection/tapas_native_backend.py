@@ -596,6 +596,21 @@ def _decompose_tc3_metadata(
                         ),
                     }
                 )
+            for key in [
+                "temporal_split_applied",
+                "temporal_split_parent_task_root",
+                "temporal_split_cluster_index",
+                "temporal_split_cluster_count",
+                "temporal_split_child_roots",
+                "temporal_component_first_timestamp_sec",
+                "temporal_component_last_timestamp_sec",
+                "temporal_component_span_minutes",
+                "temporal_component_root_retained",
+            ]:
+                if key in component:
+                    payload[key] = copy.deepcopy(component[key])
+                elif task_index < len(diagnostics) and isinstance(diagnostics[task_index], dict) and key in diagnostics[task_index]:
+                    payload[key] = copy.deepcopy(diagnostics[task_index][key])
             data.append(payload)
             task_index += 1
         return data
@@ -767,6 +782,345 @@ def _validate_graph_meta_alignment(
             raise ValueError(f"Attack count mismatch at {context} graph {index}")
 
 
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value in ("", None):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _component_node_time_range(
+    node_ids: Sequence[Any],
+    subject_time_ranges: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    first_seen: float | None = None
+    last_seen: float | None = None
+    for node_id in node_ids:
+        row = subject_time_ranges.get(str(node_id))
+        if not isinstance(row, dict):
+            continue
+        first_value = _float_or_none(row.get("first_timestamp_sec"))
+        last_value = _float_or_none(row.get("last_timestamp_sec"))
+        if first_value is None or last_value is None:
+            continue
+        if first_seen is None or first_value < first_seen:
+            first_seen = first_value
+        if last_seen is None or last_value > last_seen:
+            last_seen = last_value
+    return first_seen, last_seen
+
+
+def _component_children_map(component: dict[str, Any]) -> dict[str, list[str]]:
+    children_map: dict[str, list[str]] = {}
+    for edge in component.get("edges", []):
+        if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+            continue
+        child = str(edge[0])
+        parent = str(edge[1])
+        children_map.setdefault(parent, []).append(child)
+    for parent in list(children_map):
+        children_map[parent] = sorted({str(child) for child in children_map[parent]})
+    return children_map
+
+
+def _collect_component_subtree(root: str, children_map: dict[str, list[str]]) -> set[str]:
+    visited: set[str] = set()
+    stack = [str(root)]
+    while stack:
+        node = stack.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+        for child in reversed(children_map.get(node, [])):
+            if child not in visited:
+                stack.append(child)
+    return visited
+
+
+def _build_task_component_diagnostics_from_components(
+    components: Sequence[dict[str, Any]],
+    *,
+    child_threshold: int,
+    split_mode: str,
+    count_segmented_children_upstream: bool,
+) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for component in components:
+        children_map = _component_children_map(component)
+        task_root = str(component.get("task_root", "")).strip()
+        children = children_map.get(task_root, [])
+        row = {
+            "task_root": task_root,
+            "task_size": len(component.get("nodes", [])),
+            "internal_edge_count": len(component.get("edges", [])),
+            "boundary_node_count": len(component.get("boundary_nodes", [])),
+            "task_root_total_children": len(children),
+            "task_root_effective_children": len(children),
+            "task_root_segmented": bool(task_root and task_root in set(component.get("boundary_nodes", []))),
+            "task_root_parent_missing": False,
+            "child_threshold": int(child_threshold),
+            "split_mode": str(split_mode),
+            "count_segmented_children_upstream": bool(count_segmented_children_upstream),
+        }
+        for key in [
+            "temporal_split_applied",
+            "temporal_split_parent_task_root",
+            "temporal_split_cluster_index",
+            "temporal_split_cluster_count",
+            "temporal_split_child_roots",
+            "temporal_component_first_timestamp_sec",
+            "temporal_component_last_timestamp_sec",
+            "temporal_component_span_minutes",
+            "temporal_component_root_retained",
+        ]:
+            if key in component:
+                row[key] = copy.deepcopy(component[key])
+        diagnostics.append(row)
+    return diagnostics
+
+
+def _maybe_temporally_split_theia_component(
+    component: dict[str, Any],
+    subject_time_ranges: dict[str, Any],
+    *,
+    max_span_minutes: int,
+    branch_gap_minutes: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    root = str(component.get("task_root", "")).strip()
+    nodes = [str(node) for node in component.get("nodes", [])]
+    component_first, component_last = _component_node_time_range(nodes, subject_time_ranges)
+    span_seconds = None
+    if component_first is not None and component_last is not None:
+        span_seconds = max(0.0, component_last - component_first)
+    summary = {
+        "applied": False,
+        "task_root": root,
+        "component_span_minutes": (span_seconds / 60.0) if span_seconds is not None else None,
+        "cluster_count": 0,
+        "reason": "component_not_eligible",
+    }
+    if root == "":
+        summary["reason"] = "missing_task_root"
+        return [component], summary
+    if span_seconds is None:
+        summary["reason"] = "missing_component_time_range"
+        return [component], summary
+    if span_seconds <= float(max_span_minutes) * 60.0:
+        summary["reason"] = "within_max_span"
+        return [component], summary
+
+    children_map = _component_children_map(component)
+    direct_children = children_map.get(root, [])
+    if len(direct_children) < 2:
+        summary["reason"] = "insufficient_direct_children"
+        return [component], summary
+
+    branch_infos: list[dict[str, Any]] = []
+    for child in direct_children:
+        subtree_nodes = _collect_component_subtree(child, children_map)
+        first_seen, last_seen = _component_node_time_range(sorted(subtree_nodes), subject_time_ranges)
+        branch_infos.append(
+            {
+                "child_root": child,
+                "nodes": subtree_nodes,
+                "first_timestamp_sec": first_seen,
+                "last_timestamp_sec": last_seen,
+            }
+        )
+
+    timed_infos = [info for info in branch_infos if info["first_timestamp_sec"] is not None and info["last_timestamp_sec"] is not None]
+    if len(timed_infos) < 2:
+        summary["reason"] = "insufficient_timed_children"
+        return [component], summary
+
+    timed_infos.sort(
+        key=lambda info: (
+            float(info["first_timestamp_sec"]),
+            float(info["last_timestamp_sec"]),
+            str(info["child_root"]),
+        )
+    )
+    clusters: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_last = None
+    gap_seconds = max(0, int(branch_gap_minutes)) * 60.0
+    for info in timed_infos:
+        if not current:
+            current = [info]
+            current_last = float(info["last_timestamp_sec"])
+            continue
+        branch_first = float(info["first_timestamp_sec"])
+        branch_last = float(info["last_timestamp_sec"])
+        if current_last is not None and branch_first - current_last >= gap_seconds:
+            clusters.append(current)
+            current = [info]
+            current_last = branch_last
+            continue
+        current.append(info)
+        if current_last is None or branch_last > current_last:
+            current_last = branch_last
+    if current:
+        clusters.append(current)
+    if len(clusters) < 2:
+        summary["reason"] = "single_temporal_cluster"
+        return [component], summary
+
+    untimed_infos = [info for info in branch_infos if info["first_timestamp_sec"] is None or info["last_timestamp_sec"] is None]
+    for index, info in enumerate(untimed_infos):
+        clusters[index % len(clusters)].append(info)
+
+    original_boundary_nodes = {str(node) for node in component.get("boundary_nodes", [])}
+    original_edges = [
+        [str(edge[0]), str(edge[1])]
+        for edge in component.get("edges", [])
+        if isinstance(edge, (list, tuple)) and len(edge) >= 2
+    ]
+    new_components: list[dict[str, Any]] = []
+    for cluster_index, cluster_infos in enumerate(clusters):
+        cluster_nodes: set[str] = set()
+        cluster_child_roots: list[str] = []
+        timed_first_values: list[float] = []
+        timed_last_values: list[float] = []
+        for info in cluster_infos:
+            cluster_nodes.update(str(node) for node in info["nodes"])
+            cluster_child_roots.append(str(info["child_root"]))
+            if info["first_timestamp_sec"] is not None and info["last_timestamp_sec"] is not None:
+                timed_first_values.append(float(info["first_timestamp_sec"]))
+                timed_last_values.append(float(info["last_timestamp_sec"]))
+
+        cluster_edges = [
+            [child, parent]
+            for child, parent in original_edges
+            if child in cluster_nodes and parent in cluster_nodes
+        ]
+        root_retained = False
+        if not cluster_edges:
+            nodes_with_root = set(cluster_nodes)
+            nodes_with_root.add(root)
+            fallback_edges = [
+                [child, parent]
+                for child, parent in original_edges
+                if child in nodes_with_root and parent in nodes_with_root
+            ]
+            if not fallback_edges:
+                continue
+            cluster_nodes = nodes_with_root
+            cluster_edges = fallback_edges
+            root_retained = True
+
+        cluster_component = {
+            "task_root": str(cluster_child_roots[0]).strip() if cluster_child_roots else root,
+            "nodes": sorted(cluster_nodes),
+            "edges": cluster_edges,
+            "boundary_nodes": sorted(original_boundary_nodes | {root}),
+            "temporal_split_applied": True,
+            "temporal_split_parent_task_root": root,
+            "temporal_split_cluster_index": int(cluster_index),
+            "temporal_split_cluster_count": int(len(clusters)),
+            "temporal_split_child_roots": cluster_child_roots,
+            "temporal_component_first_timestamp_sec": min(timed_first_values) if timed_first_values else None,
+            "temporal_component_last_timestamp_sec": max(timed_last_values) if timed_last_values else None,
+            "temporal_component_span_minutes": (
+                (max(timed_last_values) - min(timed_first_values)) / 60.0
+                if timed_first_values and timed_last_values
+                else None
+            ),
+            "temporal_component_root_retained": bool(root_retained),
+        }
+        if len(cluster_component["nodes"]) < 2 or len(cluster_component["edges"]) == 0:
+            continue
+        new_components.append(cluster_component)
+
+    if len(new_components) < 2:
+        summary["reason"] = "split_components_not_viable"
+        return [component], summary
+
+    summary.update(
+        {
+            "applied": True,
+            "cluster_count": len(new_components),
+            "reason": "split_applied",
+        }
+    )
+    return new_components, summary
+
+
+def _apply_theia_temporal_split(
+    edge_list: Any,
+    *,
+    max_span_minutes: int,
+    branch_gap_minutes: int,
+) -> Any:
+    if not isinstance(edge_list, dict):
+        return edge_list
+    task_components = list(edge_list.get("task_components", []))
+    subject_time_ranges = edge_list.get("subject_time_ranges", {})
+    if not task_components or not isinstance(subject_time_ranges, dict):
+        return edge_list
+
+    new_components: list[dict[str, Any]] = []
+    split_summaries: list[dict[str, Any]] = []
+    applied_count = 0
+    for component in task_components:
+        component_splits, split_summary = _maybe_temporally_split_theia_component(
+            component,
+            subject_time_ranges,
+            max_span_minutes=max_span_minutes,
+            branch_gap_minutes=branch_gap_minutes,
+        )
+        if split_summary.get("applied"):
+            applied_count += 1
+        new_components.extend(component_splits)
+        split_summaries.append(split_summary)
+
+    if applied_count == 0:
+        updated = dict(edge_list)
+        updated["theia_temporal_split_summary"] = {
+            "enabled": True,
+            "max_span_minutes": int(max_span_minutes),
+            "branch_gap_minutes": int(branch_gap_minutes),
+            "input_component_count": len(task_components),
+            "output_component_count": len(task_components),
+            "split_component_count": 0,
+            "component_summaries": split_summaries,
+        }
+        return updated
+
+    rebuilt_edges: list[list[str]] = []
+    edge_seen: set[tuple[str, str]] = set()
+    for component in new_components:
+        for edge in component.get("edges", []):
+            if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+                continue
+            edge_key = (str(edge[0]), str(edge[1]))
+            if edge_key in edge_seen:
+                continue
+            edge_seen.add(edge_key)
+            rebuilt_edges.append([edge_key[0], edge_key[1]])
+
+    updated = dict(edge_list)
+    updated["edge_list"] = rebuilt_edges
+    updated["task_components"] = new_components
+    updated["task_component_diagnostics"] = _build_task_component_diagnostics_from_components(
+        new_components,
+        child_threshold=int(edge_list.get("child_threshold", 0) or 0),
+        split_mode=str(edge_list.get("split_mode", "fanout") or "fanout"),
+        count_segmented_children_upstream=bool(edge_list.get("count_segmented_children_upstream", False)),
+    )
+    updated["theia_temporal_split_summary"] = {
+        "enabled": True,
+        "max_span_minutes": int(max_span_minutes),
+        "branch_gap_minutes": int(branch_gap_minutes),
+        "input_component_count": len(task_components),
+        "output_component_count": len(new_components),
+        "split_component_count": int(applied_count),
+        "component_summaries": split_summaries,
+    }
+    return updated
+
+
 def _stage_optc_logs_exact(cfg: FusionConfig, workspace: Path, vendor_module: ModuleType, require_all_hosts: bool) -> None:
     optc_root = workspace / "data" / "optc"
     logs_root = optc_root / "logs"
@@ -861,6 +1215,12 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
             raw_vectors = vendor.get_node_vec(subject_node)
         elif cfg.host == "theia":
             edge_list, raw_vectors = vendor.filters(source_logs, return_task_components=True, **task_component_kwargs)
+            if bool(cfg.task_component_theia_temporal_split_enabled):
+                edge_list = _apply_theia_temporal_split(
+                    edge_list,
+                    max_span_minutes=int(cfg.task_component_theia_max_span_minutes),
+                    branch_gap_minutes=int(cfg.task_component_theia_branch_gap_minutes),
+                )
         else:
             edge_list, raw_vectors = vendor.filters(source_logs, **task_component_kwargs)
         raw_graphs = vendor.decompose(edge_list, raw_vectors, cfg.host)
@@ -879,6 +1239,9 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
         "selected_edge_list": selected_edge_list,
         "selected_embeddings": embeddings_map,
         "sequence_feature_dim": _feature_dim_from_map(embeddings_map),
+        "theia_temporal_split_summary": copy.deepcopy(edge_list.get("theia_temporal_split_summary", {}))
+        if isinstance(edge_list, dict)
+        else {},
     }
 
 def _build_optc_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
@@ -1169,24 +1532,36 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
     )
     task_component_diagnostics = []
     for meta in bundle["selected_graph_metas"]:
-        task_component_diagnostics.append(
-            {
-                "task_id": str(meta.get("task_id", "")),
-                "task_root_id": str(meta.get("task_root_id", "")).strip(),
-                "task_size": int(meta.get("task_size", len(meta.get("node_ids", [])))),
-                "internal_edge_count": int(meta.get("internal_edge_count", 0)),
-                "boundary_node_count": len(meta.get("boundary_node_ids", [])),
-                "task_root_total_children": int(meta.get("task_root_total_children", 0) or 0),
-                "task_root_effective_children": int(meta.get("task_root_effective_children", 0) or 0),
-                "task_root_segmented": bool(meta.get("task_root_segmented", False)),
-                "task_root_parent_missing": bool(meta.get("task_root_parent_missing", False)),
-                "child_threshold": int(meta.get("child_threshold", 0) or 0),
-                "split_mode": str(meta.get("split_mode", "")),
-                "count_segmented_children_upstream": bool(
-                    meta.get("count_segmented_children_upstream", False)
-                ),
-            }
-        )
+        row = {
+            "task_id": str(meta.get("task_id", "")),
+            "task_root_id": str(meta.get("task_root_id", "")).strip(),
+            "task_size": int(meta.get("task_size", len(meta.get("node_ids", [])))),
+            "internal_edge_count": int(meta.get("internal_edge_count", 0)),
+            "boundary_node_count": len(meta.get("boundary_node_ids", [])),
+            "task_root_total_children": int(meta.get("task_root_total_children", 0) or 0),
+            "task_root_effective_children": int(meta.get("task_root_effective_children", 0) or 0),
+            "task_root_segmented": bool(meta.get("task_root_segmented", False)),
+            "task_root_parent_missing": bool(meta.get("task_root_parent_missing", False)),
+            "child_threshold": int(meta.get("child_threshold", 0) or 0),
+            "split_mode": str(meta.get("split_mode", "")),
+            "count_segmented_children_upstream": bool(
+                meta.get("count_segmented_children_upstream", False)
+            ),
+        }
+        for key in [
+            "temporal_split_applied",
+            "temporal_split_parent_task_root",
+            "temporal_split_cluster_index",
+            "temporal_split_cluster_count",
+            "temporal_split_child_roots",
+            "temporal_component_first_timestamp_sec",
+            "temporal_component_last_timestamp_sec",
+            "temporal_component_span_minutes",
+            "temporal_component_root_retained",
+        ]:
+            if key in meta:
+                row[key] = copy.deepcopy(meta[key])
+        task_component_diagnostics.append(row)
     save_json(task_component_diagnostics_path, task_component_diagnostics)
     _build_segmentation_frame(bundle["selected_edge_list"]).to_csv(segmentation_edges_path, index=False)
     torch.save(bundle, native_graph_path)
@@ -1228,6 +1603,13 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
     }
     if cfg.dataset_family == "optc":
         summary["official_optc_training_hosts"] = list(bundle.get("host_order", []))
+    if cfg.host == "theia":
+        summary["task_component_theia_temporal_split_enabled"] = bool(
+            cfg.task_component_theia_temporal_split_enabled
+        )
+        summary["task_component_theia_max_span_minutes"] = int(cfg.task_component_theia_max_span_minutes)
+        summary["task_component_theia_branch_gap_minutes"] = int(cfg.task_component_theia_branch_gap_minutes)
+        summary["theia_temporal_split_summary"] = copy.deepcopy(bundle.get("theia_temporal_split_summary", {}))
     save_json(summary_path, summary)
 
     return {

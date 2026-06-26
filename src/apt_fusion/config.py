@@ -6,6 +6,14 @@ from typing import Any
 
 import yaml
 
+DEFAULT_ATTACK_EVAL_GT_JSON_FILENAME = "darpa_attack_eval_ground_truth_e3_report_enriched_20260618.json"
+
+
+def resolve_attack_eval_gt_json(repo_root: Path, configured_path: Path | None = None) -> Path:
+    if configured_path is not None:
+        return configured_path if configured_path.is_absolute() else repo_root / configured_path
+    return repo_root / "docs" / DEFAULT_ATTACK_EVAL_GT_JSON_FILENAME
+
 
 @dataclass
 class FusionConfig:
@@ -71,6 +79,13 @@ class FusionConfig:
     task_component_split_mode: str = "fanout"
     task_component_child_threshold: int = 2
     task_component_count_segmented_children_upstream: bool = False
+    task_component_theia_temporal_split_enabled: bool = False
+    task_component_theia_max_span_minutes: int = 45
+    task_component_theia_branch_gap_minutes: int = 10
+    attack_eval_gt_json_path: Path | None = None
+    path_reason_gt_window_filter_mode: str = "none"
+    path_reason_gt_window_filter_pad_minutes: int = 0
+    path_reason_gt_time_offset_minutes: int = 0
     attack_kb_stix_path: Path | None = None
     attack_kb_candidate_limit: int = 12
     attack_kb_embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -217,6 +232,15 @@ def load_config(path: str | Path) -> FusionConfig:
         task_component_count_segmented_children_upstream=bool(
             _get(data, "task_component_count_segmented_children_upstream", False)
         ),
+        task_component_theia_temporal_split_enabled=bool(
+            _get(data, "task_component_theia_temporal_split_enabled", False)
+        ),
+        task_component_theia_max_span_minutes=int(_get(data, "task_component_theia_max_span_minutes", 45)),
+        task_component_theia_branch_gap_minutes=int(_get(data, "task_component_theia_branch_gap_minutes", 10)),
+        attack_eval_gt_json_path=_optional_path(_get(data, "attack_eval_gt_json_path", "")),
+        path_reason_gt_window_filter_mode=str(_get(data, "path_reason_gt_window_filter_mode", "none")),
+        path_reason_gt_window_filter_pad_minutes=int(_get(data, "path_reason_gt_window_filter_pad_minutes", 0)),
+        path_reason_gt_time_offset_minutes=int(_get(data, "path_reason_gt_time_offset_minutes", 0)),
         attack_kb_stix_path=_optional_path(_get(data, "attack_kb_stix_path", "")),
         attack_kb_candidate_limit=int(_get(data, "attack_kb_candidate_limit", 12)),
         attack_kb_embedding_model_name=str(
@@ -427,6 +451,7 @@ def _validate(cfg: FusionConfig) -> None:
         "predicted_positive",
         "ground_truth_positive",
         "ground_truth_positive_base_only",
+        "module1_ground_truth_positive_base_only",
     }
     if cfg.module3_task_selection_mode not in allowed_module3_task_selection_modes:
         raise ValueError(
@@ -446,6 +471,25 @@ def _validate(cfg: FusionConfig) -> None:
 
     if cfg.task_component_child_threshold < 0:
         raise ValueError("task_component_child_threshold must be >= 0")
+
+    if cfg.task_component_theia_max_span_minutes <= 0:
+        raise ValueError("task_component_theia_max_span_minutes must be > 0")
+
+    if cfg.task_component_theia_branch_gap_minutes < 0:
+        raise ValueError("task_component_theia_branch_gap_minutes must be >= 0")
+
+    allowed_path_reason_gt_window_filter_modes = {"none", "confirmed_only"}
+    if cfg.path_reason_gt_window_filter_mode not in allowed_path_reason_gt_window_filter_modes:
+        raise ValueError(
+            "path_reason_gt_window_filter_mode must be one of "
+            f"{sorted(allowed_path_reason_gt_window_filter_modes)}"
+        )
+
+    if cfg.path_reason_gt_window_filter_pad_minutes < 0:
+        raise ValueError("path_reason_gt_window_filter_pad_minutes must be >= 0")
+
+    if cfg.path_reason_gt_time_offset_minutes < 0:
+        raise ValueError("path_reason_gt_time_offset_minutes must be >= 0")
 
     if cfg.graphsage_append_ocr_stat_features and not cfg.use_ocr_stat_features:
         raise ValueError("graphsage_append_ocr_stat_features requires use_ocr_stat_features=true")

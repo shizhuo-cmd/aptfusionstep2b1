@@ -1,0 +1,98 @@
+ocr_apt_root: ""
+tapas_root: ""
+
+dataset_family: "tc3"
+host: "cadets"
+source_logs: "/root/autodl-tmp/data/cadets/logs"
+
+artifacts_dir: "/root/autodl-tmp/APT-Fusionstep2b1/artifacts_cadets_train_stats_latefusion_llama31_microstep2b_alltasks_loadpredict_gtbase_tactics_only_llm_fanout_gt2_exclude_segmented_step3_objecttransfer_20260617"
+ocr_runtime_root: "/root/autodl-tmp/APT-Fusionstep2b1/runtime/darpa_tc3/cadets_train_stats_latefusion_llama31_microstep2b_alltasks_loadpredict_gtbase_tactics_only_llm_fanout_gt2_exclude_segmented_step3_objecttransfer_20260617/experiments/"
+ocr_exp_name: "fusion_exp"
+ocr_model_name: "tapas_cadets_train_stats_latefusion_llama31_microstep2b_alltasks_loadpredict_gtbase_tactics_only_llm_fanout_gt2_exclude_segmented_step3_objecttransfer_20260617.model"
+ocr_inv_exp_name: "fusion_investigation"
+
+use_sequence_embeddings: true
+use_ocr_stat_features: true
+ocr_stat_active_threshold_sec: 1.0
+task_graph_stat_late_fusion_enabled: true
+task_graph_stat_fusion_weight: 0.25
+
+task_detection_backend: "tapas_native"
+random_seed: 173
+task_detector_mode: "load_and_predict"
+task_detector_model_input: "/root/autodl-tmp/APT-Fusionstep2b1/artifacts_cadets_train_stats_latefusion_llama31_microstep2b_tactics_only_llm_gtonly_fanout_gt2_exclude_segmented_20260614/module2/tapas_native_model.pt"
+task_detector_model_output: "/root/autodl-tmp/APT-Fusionstep2b1/artifacts_cadets_train_stats_latefusion_llama31_microstep2b_alltasks_loadpredict_gtbase_tactics_only_llm_fanout_gt2_exclude_segmented_step3_objecttransfer_20260617/module2/tapas_native_model.pt"
+task_ground_truth_path: "/root/autodl-tmp/data/cadets/cadets.txt"
+
+task_classifier_hidden_dim: 64
+task_classifier_num_layers: 2
+task_classifier_dropout: 0.5
+task_classifier_lr: 0.001
+task_classifier_weight_decay: 0.0005
+task_classifier_epochs: 100
+task_classifier_batch_size: 500
+task_classifier_pooling: "max"
+task_decision_threshold: 0.5
+task_fit_test_fraction: 0.2
+task_min_graph_nodes: 2
+task_graph_bidirectional_edges: false
+task_graph_self_loops: false
+task_tapas_augmentation_enabled: false
+task_tapas_augmentation_divisor: 0
+task_tapas_augmentation_before_split: false
+task_tapas_faithful_mode: true
+
+number_of_hops: 1
+max_edges: 5000
+top_k: 15
+abnormality_level: "Moderate"
+
+llm_exp_name: "fusion_llm"
+llm_model_source: "ollama"
+llm_model: "llama3_1_8b_instruct_ms_q3km"
+llm_embedding_model_source: "ollama"
+llm_embedding_model: "granite-embedding:278m"
+llm_openai_api_key: ""
+llm_deepseek_api_key: ""
+llm_ollama_base_url: "http://127.0.0.1:11434"
+llm_request_timeout_sec: 1800
+llm_similarity_top_k: 3
+llm_report_mode: "attack_only"
+llm_skip_ioc_enrichment: true
+load_index: false
+attack_kb_stix_path: "/root/autodl-tmp/data/attack-stix-data/enterprise-attack.json"
+attack_kb_candidate_limit: 12
+attack_kb_embedding_model_name: "sentence-transformers/all-MiniLM-L6-v2"
+attack_kb_sparse_top_k: 24
+attack_kb_vector_top_k: 24
+attack_kb_sparse_weight: 0.45
+attack_kb_vector_weight: 0.55
+attack_kb_claim_weight: 0.25
+attack_kb_enable_vector: false
+claim_attack_prior_mode: "disabled"
+attack_mapping_scope: "tactics_only"
+tactic_mapping_mode: "llm"
+
+graphdb_repository_url: ""
+graphdb_username: ""
+graphdb_password: ""
+
+local_max_events_per_subgraph: 200000
+local_max_open_event_files: 32
+local_task_event_shards: 256
+local_context_hops: 1
+local_context_include_object_side: false
+module3_task_selection_mode: "ground_truth_positive_base_only"
+local_report_max_events_per_subgraph: 1200
+local_report_time_window_minutes: 180
+bundle_episode_bucket_minutes: 1
+bundle_lane_execution_quota: 8
+bundle_lane_file_persistence_quota: 8
+bundle_lane_network_c2_quota: 8
+bundle_lane_recon_quota: 6
+bundle_lane_pivot_quota: 6
+stage_inference_enabled: false
+
+task_component_split_mode: "fanout"
+task_component_child_threshold: 2
+task_component_count_segmented_children_upstream: false

@@ -444,6 +444,26 @@ def _extract_subject_node_attr(payload: Dict[str, object]) -> str:
     )
 
 
+def _extract_file_object_node_attr(payload: Dict[str, object]) -> str:
+    base_object = payload.get("baseObject")
+    base_prop_map = {}
+    if isinstance(base_object, dict):
+        properties = base_object.get("properties")
+        candidate = properties.get("map", {}) if isinstance(properties, dict) else {}
+        if isinstance(candidate, dict):
+            base_prop_map = candidate
+    return _first_non_empty(
+        [
+            payload.get("path"),
+            payload.get("filename"),
+            base_prop_map.get("filename"),
+            base_prop_map.get("path"),
+            payload.get("fileDescriptor"),
+            payload.get("type"),
+        ]
+    )
+
+
 def _extract_darpa_node_records(obj: Dict[str, object]) -> List[tuple[str, _NodeAttr]]:
     datum = obj.get(DATUM_KEY)
     if not isinstance(datum, dict):
@@ -465,14 +485,7 @@ def _extract_darpa_node_records(obj: Dict[str, object]) -> List[tuple[str, _Node
             node_attr = _extract_subject_node_attr(payload)
         elif short_name == "FileObject":
             node_type = "file"
-            node_attr = _first_non_empty(
-                [
-                    payload.get("path"),
-                    payload.get("filename"),
-                    payload.get("fileDescriptor"),
-                    payload.get("type"),
-                ]
-            )
+            node_attr = _extract_file_object_node_attr(payload)
         elif short_name == "RegistryKeyObject":
             node_type = "file"
             node_attr = _first_non_empty([payload.get("key"), payload.get("path")])
@@ -794,6 +807,8 @@ def _select_task_rows(rows: List[dict], cfg: FusionConfig) -> List[dict]:
         elif mode == "ground_truth_positive":
             include = int(row.get("task_label", 0) or 0) == 1
         elif mode == "ground_truth_positive_base_only":
+            include = int(row.get("task_label", 0) or 0) == 1 and not _is_augmented_task_id(task_id)
+        elif mode == "module1_ground_truth_positive_base_only":
             include = int(row.get("task_label", 0) or 0) == 1 and not _is_augmented_task_id(task_id)
         if include:
             selected.append(row)

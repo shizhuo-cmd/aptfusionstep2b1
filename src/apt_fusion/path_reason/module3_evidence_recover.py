@@ -464,6 +464,232 @@ def _load_task_sidecar_lookups(cfg: FusionConfig) -> tuple[Path, Path, Path]:
     )
 
 
+def _module1_gt_selection_sidecars_dir(cfg: FusionConfig) -> Path:
+    return cfg.module3_evidence_dir / "_module1_gt_selection_sidecars"
+
+
+def _load_module1_native_bundle(module1_dir: Path) -> dict[str, Any]:
+    from ..task_detection.tapas_native_backend import _load_native_bundle
+
+    return _load_native_bundle(module1_dir)
+
+
+def _normalize_ref_to_process_id(value: Any, process_ids: list[str]) -> str:
+    if isinstance(value, int):
+        index = int(value)
+        if 0 <= index < len(process_ids):
+            return process_ids[index]
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        index = int(text)
+        if 0 <= index < len(process_ids):
+            return process_ids[index]
+    if text in process_ids:
+        return text
+    return ""
+
+
+def _edge_rows_for_graph(graph: dict[str, Any], process_ids: list[str]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for edge in graph.get("edges", []) or []:
+        if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+            continue
+        src = _normalize_ref_to_process_id(edge[0], process_ids)
+        dst = _normalize_ref_to_process_id(edge[1], process_ids)
+        if src and dst:
+            rows.append({"src": src, "dst": dst})
+    return rows
+
+
+def _task_root_leaf_ids(
+    process_ids: list[str],
+    local_edges: list[dict[str, str]],
+) -> tuple[list[str], list[str], dict[str, int], dict[str, int], dict[str, set[str]]]:
+    indegree = {pid: 0 for pid in process_ids}
+    outdegree = {pid: 0 for pid in process_ids}
+    neighbors = {pid: set() for pid in process_ids}
+
+    for edge in local_edges:
+        src = edge["src"]
+        dst = edge["dst"]
+        outdegree[src] = outdegree.get(src, 0) + 1
+        indegree[dst] = indegree.get(dst, 0) + 1
+        neighbors.setdefault(src, set()).add(dst)
+        neighbors.setdefault(dst, set()).add(src)
+
+    root_process_ids = sorted([pid for pid in process_ids if outdegree.get(pid, 0) == 0])
+    leaf_process_ids = sorted([pid for pid in process_ids if indegree.get(pid, 0) == 0])
+    return root_process_ids, leaf_process_ids, indegree, outdegree, neighbors
+
+
+def _safe_l2(values: Any) -> float:
+    total = 0.0
+    for value in list(values or []):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        total += number * number
+    return total ** 0.5
+
+
+def _prepare_module1_gt_selection_sidecars(cfg: FusionConfig) -> tuple[Path, Path, Path]:
+    bundle = _load_module1_native_bundle(cfg.module1_dir)
+    graphs = list(bundle.get("selected_graphs", []))
+    metas = list(bundle.get("selected_graph_metas", []))
+    sidecar_dir = _module1_gt_selection_sidecars_dir(cfg)
+    ensure_dir(sidecar_dir)
+
+    suspicious_rows: list[dict[str, Any]] = []
+    meta_rows: list[dict[str, Any]] = []
+    attribution_rows: list[dict[str, Any]] = []
+
+    for graph, meta in zip(graphs, metas):
+        task_id = str(meta.get("task_id", "")).strip()
+        if not task_id or re.search(r"_aug\d{3}$", task_id):
+            continue
+        label = int(meta.get("label", graph.get("label", 0)) or 0)
+        if label != 1:
+            continue
+
+        process_ids = [str(node) for node in meta.get("node_ids", [])]
+        local_edges = _edge_rows_for_graph(graph, process_ids)
+        root_process_ids, leaf_process_ids, indegree, outdegree, neighbors = _task_root_leaf_ids(
+            process_ids,
+            local_edges,
+        )
+        degree = {pid: indegree.get(pid, 0) + outdegree.get(pid, 0) for pid in process_ids}
+        bridge_degree = {pid: len(neighbors.get(pid, set())) for pid in process_ids}
+        raw_nodes = list(graph.get("nodes", []) or [])
+        feature_norms = {
+            pid: _safe_l2(raw_nodes[index]) if index < len(raw_nodes) else 0.0
+            for index, pid in enumerate(process_ids)
+        }
+        max_feature_norm = max(feature_norms.values(), default=0.0) or 1.0
+        max_degree = max(degree.values(), default=0) or 1
+        max_bridge = max(bridge_degree.values(), default=0) or 1
+        node_scores: dict[str, float] = {}
+        for pid in process_ids:
+            root_bonus = 1.0 if pid in root_process_ids else 0.0
+            node_scores[pid] = (
+                0.45 * (feature_norms.get(pid, 0.0) / max_feature_norm)
+                + 0.25 * (float(degree.get(pid, 0)) / float(max_degree))
+                + 0.15 * (float(bridge_degree.get(pid, 0)) / float(max_bridge))
+                + 0.15 * root_bonus
+            )
+
+        top_processes = sorted(
+            [
+                {
+                    "process_id": pid,
+                    "score": float(node_scores.get(pid, 0.0)),
+                    "feature_norm": float(feature_norms.get(pid, 0.0)),
+                    "degree": int(degree.get(pid, 0)),
+                    "in_degree": int(indegree.get(pid, 0)),
+                    "out_degree": int(outdegree.get(pid, 0)),
+                    "neighbor_count": int(bridge_degree.get(pid, 0)),
+                    "is_root": pid in root_process_ids,
+                    "is_leaf": pid in leaf_process_ids,
+                }
+                for pid in process_ids
+            ],
+            key=lambda item: (float(item["score"]), item["process_id"]),
+            reverse=True,
+        )
+        top_edges = sorted(
+            [
+                {
+                    "src": edge["src"],
+                    "dst": edge["dst"],
+                    "score": float(
+                        (node_scores.get(edge["src"], 0.0) + node_scores.get(edge["dst"], 0.0)) / 2.0
+                    ),
+                }
+                for edge in local_edges
+            ],
+            key=lambda item: (float(item["score"]), item["src"], item["dst"]),
+            reverse=True,
+        )
+        task_root_id = str(meta.get("task_root_id", "")).strip() or (root_process_ids[0] if root_process_ids else "")
+        graph_density = 0.0
+        if len(process_ids) > 1:
+            graph_density = float(len(local_edges)) / float(len(process_ids) * (len(process_ids) - 1))
+
+        suspicious_rows.append(
+            {
+                "task_id": task_id,
+                "task_score": 1.0,
+                "task_probability": 1.0,
+                "graphsage_probability": 1.0,
+                "stats_probability": None,
+                "task_label": 1,
+                "predicted_label": 1,
+                "prediction_mode": "ground_truth_direct",
+                "task_size": int(meta.get("task_size", len(process_ids))),
+                "internal_edge_count": int(meta.get("internal_edge_count", len(local_edges))),
+                "graph_edge_source": "tapas_parent_child_edges",
+                "task_score_basis": "module1_ground_truth_direct",
+                "fusion_weight_stats": 0.0,
+                "threshold_used": None,
+                "is_suspicious": True,
+                "process_ids": process_ids,
+            }
+        )
+        meta_rows.append(
+            {
+                "task_id": task_id,
+                "task_score": 1.0,
+                "task_probability": 1.0,
+                "graphsage_probability": 1.0,
+                "stats_probability": None,
+                "task_size": int(meta.get("task_size", len(process_ids))),
+                "internal_edge_count": int(meta.get("internal_edge_count", len(local_edges))),
+                "graph_task_id": task_id,
+                "task_root_id": task_root_id,
+                "boundary_node_ids": [str(item) for item in meta.get("boundary_node_ids", [])],
+                "process_ids": process_ids,
+                "root_process_ids": root_process_ids,
+                "leaf_process_ids": leaf_process_ids,
+                "local_edges": local_edges,
+                "graph_density": graph_density,
+                "prediction_mode": "ground_truth_direct",
+                "is_suspicious": True,
+            }
+        )
+        attribution_rows.append(
+            {
+                "task_id": task_id,
+                "graph_task_id": task_id,
+                "top_processes": top_processes[: min(12, len(top_processes))],
+                "top_edges": top_edges[: min(12, len(top_edges))],
+                "root_process_ids": root_process_ids,
+                "leaf_process_ids": leaf_process_ids,
+                "graph_density": graph_density,
+            }
+        )
+
+    suspicious_path = sidecar_dir / "suspicious_tasks.json"
+    task_meta_rich_path = sidecar_dir / "task_meta_rich.json"
+    task_attribution_path = sidecar_dir / "task_attribution.json"
+    summary_path = sidecar_dir / "summary.json"
+    save_json(suspicious_path, suspicious_rows)
+    save_json(task_meta_rich_path, meta_rows)
+    save_json(task_attribution_path, attribution_rows)
+    save_json(
+        summary_path,
+        {
+            "selection_mode": "module1_ground_truth_positive_base_only",
+            "task_count": len(suspicious_rows),
+            "module1_dir": str(cfg.module1_dir),
+            "sidecar_dir": str(sidecar_dir),
+        },
+    )
+    return suspicious_path, task_meta_rich_path, task_attribution_path
+
+
 def run_module3_evidence(
     cfg: FusionConfig,
     suspicious_tasks_path: Path | None = None,
@@ -471,7 +697,11 @@ def run_module3_evidence(
     task_attribution_path: Path | None = None,
 ) -> Dict[str, str]:
     rules = load_path_rules(cfg)
-    if suspicious_tasks_path is None or task_meta_rich_path is None or task_attribution_path is None:
+    if str(cfg.module3_task_selection_mode).strip() == "module1_ground_truth_positive_base_only":
+        suspicious_tasks_path, task_meta_rich_path, task_attribution_path = _prepare_module1_gt_selection_sidecars(
+            cfg
+        )
+    elif suspicious_tasks_path is None or task_meta_rich_path is None or task_attribution_path is None:
         suspicious_default, rich_default, attr_default = _load_task_sidecar_lookups(cfg)
         suspicious_tasks_path = suspicious_tasks_path or suspicious_default
         task_meta_rich_path = task_meta_rich_path or rich_default

@@ -6,6 +6,14 @@ import copy
 from typing import Any, Dict
 
 from .bridge_builder import build_bridge_edges
+from .chain_semantics import (
+    TEMP_EXEC_MARKERS,
+    collect_staged_object_keys,
+    collect_precursor_event_ids,
+    is_placeholder_object_key,
+    normalize_semantic_text,
+    staged_object_keys_from_bridge_edges,
+)
 from .holmes_claims import build_holmes_claim_graph
 from .label_provenance import is_provenance_key_label, load_label_provenance_records
 from ..common import ensure_dir, load_json, load_jsonl, save_json
@@ -44,10 +52,8 @@ def _candidate_dir(cfg: FusionConfig) -> Path:
 
 
 _STAGE_ORDER = ["Entry", "ExecutionWeak", "ExecutionStrong", "TargetAccess", "FollowUp"]
-_PRECURSOR_MARKERS = ("tcexec", "command-not-found", "/dev/pts/3", "python3", "chmod", "bash")
 _ATTACHMENT_MARKERS = ("attachment", "tcexec", "pine", "mail", "rimapd")
 _MAIL_BROWSER_MARKERS = ("firefox", "thunderbird", "pine", "mail", "browser")
-_TEMP_EXEC_MARKERS = ("/tmp/", "/var/tmp/", "/dev/shm/", "ztmp")
 _NETWORK_SEND_TYPES = {"SEND", "CONNECT"}
 _NETWORK_RECV_TYPES = {"RECV", "CONNECT"}
 _DELETE_EVENT_TYPES = {"DELETE", "UNLINK", "RENAME"}
@@ -55,8 +61,7 @@ _SUSPICIOUS_BRIDGE_LABELS = {"O_FILE_DOWNLOADED", "O_FILE_UPLOADED", "O_SUSPECT_
 _ATOM_TO_FAMILY = {
     "attachment_user_exec": "attachment_or_tcexec_exec",
     "untrusted_file_exec": "initial_or_drop_exec",
-    "make_file_exec": "initial_or_drop_exec",
-    "make_mem_exec": "initial_or_drop_exec",
+    "payload_elevate": "privilege_escalation_followup",
     "cnc_communication": "callback_c2",
     "network_service_discovery": "scan_discovery",
     "clear_logs": "cleanup_delete",
@@ -68,6 +73,7 @@ _FAMILY_PRIORITY = [
     "short_lived_precursor",
     "attachment_or_tcexec_exec",
     "initial_or_drop_exec",
+    "privilege_escalation_followup",
     "callback_c2",
     "scan_discovery",
     "cleanup_delete",
@@ -421,14 +427,7 @@ def _object_lineage_summary(
 
 
 def _collect_precursor_event_ids(events: list[dict[str, Any]]) -> list[str]:
-    output: list[str] = []
-    for event in events:
-        if not any(marker in _event_text(event) for marker in _PRECURSOR_MARKERS):
-            continue
-        event_id = str(event.get("event_id", "")).strip()
-        if event_id:
-            output.append(event_id)
-    return _sorted_unique(output)[:8]
+    return collect_precursor_event_ids(events, limit=8)
 
 
 def _collect_followup_event_ids(events: list[dict[str, Any]]) -> list[str]:
@@ -448,10 +447,44 @@ def _collect_followup_event_ids(events: list[dict[str, Any]]) -> list[str]:
             if event_id:
                 output.append(event_id)
             continue
-        if event_type in _DELETE_EVENT_TYPES and any(marker in object_key for marker in _TEMP_EXEC_MARKERS):
+        if event_type in _DELETE_EVENT_TYPES and any(marker in object_key for marker in TEMP_EXEC_MARKERS):
             event_id = str(event.get("event_id", "")).strip()
             if event_id:
                 output.append(event_id)
+    return _sorted_unique(output)[:8]
+
+
+def _collect_extra_cleanup_followup_event_ids(
+    support_events: list[dict[str, Any]],
+    retained_events: list[dict[str, Any]],
+    *,
+    path_process_set: set[str],
+    suspicious_object_keys: set[str],
+) -> list[str]:
+    staged_keys = collect_staged_object_keys(
+        support_events,
+        suspicious_object_keys=suspicious_object_keys,
+    )
+    if not staged_keys:
+        return []
+    output: list[str] = []
+    for event in retained_events:
+        event_id = str(event.get("event_id", "")).strip()
+        if not event_id:
+            continue
+        event_type = str(event.get("event_type", "")).strip().upper()
+        if event_type not in _DELETE_EVENT_TYPES:
+            continue
+        object_key = normalize_semantic_text(event.get("object_key"))
+        if not object_key or is_placeholder_object_key(object_key):
+            continue
+        if object_key not in staged_keys and not any(marker in object_key for marker in TEMP_EXEC_MARKERS):
+            continue
+        process_guid = str(event.get("process_guid", "")).strip()
+        parent_process_guid = str(event.get("parent_process_guid", "")).strip()
+        if process_guid and process_guid not in path_process_set and parent_process_guid not in path_process_set:
+            continue
+        output.append(event_id)
     return _sorted_unique(output)[:8]
 
 
@@ -465,14 +498,19 @@ def _family_tags_from_path(
     process_blob = _path_process_name_blob(path, process_states)
     label_set = set(path.labels)
     matched_atoms = set(path.holmes_matched_atoms)
+    staged_bridge_keys = staged_object_keys_from_bridge_edges(path.bridge_edges)
     for atom in matched_atoms:
         family = _ATOM_TO_FAMILY.get(atom, "")
         if family and family not in tags:
             tags.append(family)
     if any(marker in event_blob for marker in _ATTACHMENT_MARKERS):
         tags.append("attachment_or_tcexec_exec")
-    if any(marker in event_blob for marker in _TEMP_EXEC_MARKERS) or label_set.intersection(
+    if (
+        any(marker in event_blob for marker in TEMP_EXEC_MARKERS)
+        or bool(staged_bridge_keys)
+        or label_set.intersection(
         {"B_EXEC_TEMP", "B_EXEC_DOWNLOADED", "B_EXEC_UPLOADED", "B_EXEC_SUSPECT_WRITTEN"}
+        )
     ):
         tags.append("initial_or_drop_exec")
     if label_set.intersection({"B_EXTERNAL_SEND", "B_EXTERNAL_RECV"}) or "remote_targets=" in path.network_support_summary:
@@ -481,12 +519,27 @@ def _family_tags_from_path(
         tags.append("scan_discovery")
     if path.precursor_event_ids:
         tags.append("short_lived_precursor")
-    if label_set.intersection({"B_DELETE_LOG"}) or any(marker in event_blob for marker in ("delete", "unlink", "ztmp")):
+    if _has_concrete_cleanup_signal(events):
         tags.append("cleanup_delete")
     if any(marker in f"{event_blob} {process_blob}" for marker in _MAIL_BROWSER_MARKERS):
         tags.append("mail_browser_context_tail")
     unique_tags = _sorted_unique(tags)
     return sorted(unique_tags, key=lambda item: _FAMILY_PRIORITY.index(item) if item in _FAMILY_PRIORITY else 99)
+
+
+def _has_concrete_cleanup_signal(events: list[dict[str, Any]]) -> bool:
+    for event in events:
+        labels = set(_event_labels(event))
+        if "B_DELETE_LOG" in labels:
+            return True
+        event_type = str(event.get("event_type", "")).strip().upper()
+        object_key = normalize_semantic_text(event.get("object_key"))
+        if event_type not in _DELETE_EVENT_TYPES or not object_key or is_placeholder_object_key(object_key):
+            continue
+        object_labels = {str(value).strip() for value in event.get("object_labels", []) or [] if str(value).strip()}
+        if any(marker in object_key for marker in TEMP_EXEC_MARKERS) or object_labels.intersection(_SUSPICIOUS_BRIDGE_LABELS):
+            return True
+    return False
 
 
 def _truth_like_hints(
@@ -508,6 +561,8 @@ def _truth_like_hints(
         hints.append("external_network_seen_without_callback_family")
     if any(marker in event_blob or marker in process_blob for marker in _ATTACHMENT_MARKERS) and "attachment_or_tcexec_exec" not in path.family_tags:
         hints.append("attachment_markers_without_exec_family")
+    if "elevate" in event_blob and "privilege_escalation_followup" not in path.family_tags:
+        hints.append("elevate_markers_without_privilege_family")
     return _sorted_unique(hints)
 
 
@@ -536,13 +591,20 @@ def _candidate_from_precursor_cluster(
     rules: Any,
     existing_paths: list[CandidatePath],
 ) -> CandidatePath | None:
-    precursor_events = [
+    candidate_events = [
         event
         for event in retained_events
-        if any(marker in _event_text(event) for marker in _PRECURSOR_MARKERS)
+        if any(marker in _event_text(event) for marker in ("tcexec", "command-not-found", "/dev/pts/3", "python3", "chmod", "bash"))
     ]
-    if len(precursor_events) < 2:
+    precursor_event_ids = collect_precursor_event_ids(candidate_events, limit=8)
+    if len(precursor_event_ids) < 2:
         return None
+    event_lookup = {
+        str(event.get("event_id", "")).strip(): event
+        for event in candidate_events
+        if str(event.get("event_id", "")).strip()
+    }
+    precursor_events = [event_lookup[event_id] for event_id in precursor_event_ids if event_id in event_lookup]
     precursor_events.sort(key=lambda item: int(item.get("order_index", 0) or 0))
     process_ids = _sorted_unique(
         [
@@ -603,9 +665,6 @@ def _candidate_from_precursor_cluster(
         for guid in process_chain
         if guid in process_states and process_states[guid].end_time is not None
     ]
-    precursor_event_ids = _sorted_unique(
-        [str(event.get("event_id", "")).strip() for event in precursor_events if str(event.get("event_id", "")).strip()]
-    )[:8]
     return CandidatePath(
         path_id=f"{task_id}_candidate_precursor_rescue",
         task_id=task_id,
@@ -764,13 +823,34 @@ def _augment_candidate_support(
         for event_id in ordered_event_ids
         if event_id in event_lookup
     ]
+    extra_cleanup_followup_ids = _collect_extra_cleanup_followup_event_ids(
+        support_events,
+        retained_events,
+        path_process_set=path_process_set,
+        suspicious_object_keys=staged_object_keys_from_bridge_edges(path.bridge_edges),
+    )
+    if extra_cleanup_followup_ids:
+        support_event_ids.update(extra_cleanup_followup_ids)
+        ordered_event_ids = sorted(support_event_ids, key=lambda item: _event_order_key(item, event_lookup))
+        support_events = [
+            event_lookup[event_id]
+            for event_id in ordered_event_ids
+            if event_id in event_lookup
+        ]
     path.support_event_ids = ordered_event_ids
     path.support_object_keys = ordered_object_keys
     path.support_relations = support_relations[:12]
     path.context_ids = sorted(context_ids)
     path.chain_kind = _chain_kind_from_stages(path.stage_coverage)
-    path.precursor_event_ids = _collect_precursor_event_ids(support_events)
-    path.followup_event_ids = _collect_followup_event_ids(support_events)
+    path.precursor_event_ids = collect_precursor_event_ids(
+        support_events,
+        suspicious_object_keys=staged_object_keys_from_bridge_edges(path.bridge_edges),
+        limit=8,
+    )
+    followup_event_ids = _collect_followup_event_ids(support_events)
+    if extra_cleanup_followup_ids:
+        followup_event_ids = _sorted_unique(extra_cleanup_followup_ids + followup_event_ids)[:8]
+    path.followup_event_ids = followup_event_ids
     path.network_support_summary = _network_support_summary(support_events)
     path.object_lineage_summary = _object_lineage_summary(path, object_versions_by_object)
 

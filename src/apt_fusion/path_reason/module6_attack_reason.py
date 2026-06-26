@@ -77,6 +77,18 @@ _TECHNIQUE_NAME_BY_ID = {
     "T1204.002": "Malicious File",
 }
 _WEB_C2_PORTS = {"80", "443", "8080", "8443"}
+_BROWSER_CREDENTIAL_PROCESS_MARKERS = (
+    "firefox",
+    "chrome",
+    "chromium",
+    "edge",
+    "safari",
+    "thunderbird",
+    "outlook",
+    "mail",
+    "fluxbox",
+)
+_BROWSER_CREDENTIAL_ALLOWED_TACTICS = {"TA0001", "TA0002", "TA0006"}
 _STRONG_EXEC_FAMILY_TAGS = {
     "short_lived_precursor",
     "attachment_or_tcexec_exec",
@@ -155,6 +167,88 @@ def _tactics_only_enabled(cfg: FusionConfig) -> bool:
 
 def _deterministic_tactic_mapping_enabled(cfg: FusionConfig) -> bool:
     return _tactics_only_enabled(cfg) and _tactic_mapping_mode(cfg) == "deterministic"
+
+
+def _clone_attack_candidates(payload: dict[str, Any]) -> dict[str, Any]:
+    tactics = [dict(item) for item in payload.get("tactics", []) if isinstance(item, dict)] if isinstance(payload, dict) else []
+    techniques = [dict(item) for item in payload.get("techniques", []) if isinstance(item, dict)] if isinstance(payload, dict) else []
+    return {"tactics": tactics, "techniques": techniques}
+
+
+def _claim_behavior_types(claims: List[dict[str, Any]] | None) -> set[str]:
+    output: set[str] = set()
+    for claim in claims or []:
+        if not isinstance(claim, dict):
+            continue
+        behavior = str(claim.get("behavior_type", "")).strip().lower()
+        if behavior:
+            output.add(behavior)
+    return output
+
+
+def _browser_credential_submit_context(dossier: dict[str, Any], claims: List[dict[str, Any]] | None) -> bool:
+    behaviors = _claim_behavior_types(claims)
+    if "credential_submit" not in behaviors:
+        return False
+    if behaviors.intersection(
+        {
+            "cnc_communication",
+            "network_service_discovery",
+            "payload_elevate",
+            "clear_logs",
+            "sensitive_read",
+            "sensitive_leak",
+            "send_internal",
+        }
+    ):
+        return False
+    if not behaviors.issubset({"credential_submit", "untrusted_read", "untrusted_file_exec"}):
+        return False
+    family_tags = {
+        str(value).strip().lower()
+        for value in dossier.get("family_tags", []) or []
+        if str(value).strip()
+    }
+    if "mail_browser_context_tail" not in family_tags:
+        return False
+    process_names = [
+        str(item.get("name", "")).strip().lower()
+        for item in dossier.get("core_processes", []) or []
+        if isinstance(item, dict) and str(item.get("name", "")).strip()
+    ]
+    return any(any(marker in name for marker in _BROWSER_CREDENTIAL_PROCESS_MARKERS) for name in process_names)
+
+
+def _prune_attack_candidates_for_claim_context(
+    cfg: FusionConfig,
+    dossier: dict[str, Any],
+    claims: List[dict[str, Any]] | None,
+    attack_candidates: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    if not _tactics_only_enabled(cfg):
+        return attack_candidates, ""
+    if not isinstance(attack_candidates, dict):
+        return {"tactics": [], "techniques": []}, ""
+    if not _browser_credential_submit_context(dossier, claims):
+        return attack_candidates, ""
+    pruned = dict(attack_candidates)
+    pruned["tactics"] = [
+        dict(item)
+        for item in attack_candidates.get("tactics", []) or []
+        if isinstance(item, dict)
+        and str(item.get("external_id", "")).strip().upper() in _BROWSER_CREDENTIAL_ALLOWED_TACTICS
+    ]
+    pruned["techniques"] = [
+        dict(item)
+        for item in attack_candidates.get("techniques", []) or []
+        if isinstance(item, dict)
+        and {
+            str(value).strip().upper()
+            for value in item.get("tactic_ids", []) or []
+            if str(value).strip()
+        }.intersection(_BROWSER_CREDENTIAL_ALLOWED_TACTICS)
+    ]
+    return pruned, "browser_credential_submit_context"
 
 
 def _system_prompt() -> str:
@@ -272,13 +366,21 @@ def _compact_timeline_line(item: dict[str, Any]) -> str:
     event_type = str(item.get("event_type", "")).strip().upper()
     object_class = str(item.get("object_class", "")).strip()
     object_key = _truncate_text(str(item.get("object_key", "")).strip(), 92)
+    process_name = str(item.get("process_name", "")).strip()
+    process_guid = str(item.get("process_guid", "")).strip()
     labels = _csv([str(value) for value in item.get("labels_triggered", [])], limit=8)
+    object_labels = _csv([str(value) for value in item.get("object_labels", [])], limit=6)
     description = _truncate_text(str(item.get("description", "")).strip(), 128)
     parts = []
     if timestamp:
         parts.append(timestamp)
     if event_id:
         parts.append(f"id={event_id}")
+    if process_name:
+        process_part = process_name
+        if process_guid:
+            process_part = f"{process_part}({process_guid})"
+        parts.append(f"proc={process_part}")
     if event_type:
         parts.append(event_type)
     if object_class:
@@ -287,6 +389,8 @@ def _compact_timeline_line(item: dict[str, Any]) -> str:
         parts.append(object_key)
     if labels:
         parts.append(f"labels={labels}")
+    if object_labels:
+        parts.append(f"obj_labels={object_labels}")
     if description:
         parts.append(f"desc={description}")
     return " | ".join(parts)
@@ -372,6 +476,18 @@ def _render_compact_path_dossier(dossier: dict[str, Any]) -> str:
     if object_lineage_summary:
         lines.append("OBJECT_LINEAGE")
         lines.append(f"- {object_lineage_summary}")
+    service_context_summary = _truncate_text(str(dossier.get("service_context_summary", "")).strip(), 180)
+    if service_context_summary:
+        lines.append("SERVICE_CONTEXT")
+        lines.append(f"- {service_context_summary}")
+    sensitive_object_summary = _truncate_text(str(dossier.get("sensitive_object_summary", "")).strip(), 180)
+    if sensitive_object_summary:
+        lines.append("SENSITIVE_OBJECTS")
+        lines.append(f"- {sensitive_object_summary}")
+    cleanup_object_summary = _truncate_text(str(dossier.get("cleanup_object_summary", "")).strip(), 180)
+    if cleanup_object_summary:
+        lines.append("CLEANUP_OBJECTS")
+        lines.append(f"- {cleanup_object_summary}")
     lines.append("PROCESSES")
     processes = dossier.get("core_processes", []) or []
     if processes:
@@ -1679,13 +1795,25 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
                 "edges": [item for item in claim_graph.get("edges", []) if isinstance(item, dict)],
             }
             iocs = _validate_iocs(list(raw_extract.get("iocs", [])))
-            attack_candidates = retrieve_attack_candidates(cfg, _synthetic_bundle_for_attack_kb(dossier), claims)
+            attack_candidates_retrieved = retrieve_attack_candidates(cfg, _synthetic_bundle_for_attack_kb(dossier), claims)
+            attack_candidates_post_priors = _clone_attack_candidates(attack_candidates_retrieved)
             if _claim_attack_priors_enabled(cfg):
-                attack_candidates = _augment_attack_candidates_with_behavior_priors(cfg, dossier, attack_candidates, claims)
+                attack_candidates_post_priors = _augment_attack_candidates_with_behavior_priors(
+                    cfg,
+                    dossier,
+                    attack_candidates_post_priors,
+                    claims,
+                )
                 claim_attack_hints = _behavior_prior_hints_for_claims(cfg, dossier, claims)
             else:
                 claim_attack_hints = []
-            attack_candidates = _filter_attack_candidates_for_scope(cfg, attack_candidates)
+            attack_candidates = _filter_attack_candidates_for_scope(cfg, attack_candidates_post_priors)
+            attack_candidates, attack_candidate_context_prune_reason = _prune_attack_candidates_for_claim_context(
+                cfg,
+                dossier,
+                claims,
+                attack_candidates,
+            )
             mapping_context = {
                 "path_dossier": dossier,
                 "claims": claims,
@@ -1730,6 +1858,11 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
                 "claim_graph": claim_graph,
                 "extracted_behaviors": claims,
                 "iocs": iocs,
+                "claim_attack_prior_mode": cfg.claim_attack_prior_mode,
+                "attack_candidates_retrieved": _clone_attack_candidates(attack_candidates_retrieved),
+                "attack_candidates_post_priors": _clone_attack_candidates(attack_candidates_post_priors),
+                "attack_candidates_post_context_guard": _clone_attack_candidates(attack_candidates),
+                "attack_candidate_context_prune_reason": attack_candidate_context_prune_reason,
                 "attack_candidates": attack_candidates,
                 "attack_mappings": mappings,
                 "attack_mapping_scope": _attack_mapping_scope(cfg),

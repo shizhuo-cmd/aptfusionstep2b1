@@ -12,7 +12,7 @@ _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from apt_fusion.config import load_config
+from apt_fusion.config import load_config, resolve_attack_eval_gt_json
 from apt_fusion.evaluation.path_reason_eval import apply_gt_time_offset, load_gt_reference, run_evaluation
 from apt_fusion.path_reason.module6_attack_reason import run_module6_reason
 
@@ -23,7 +23,7 @@ CONFIG_PATH = Path(
     "configs/fusion_cloud_trace_train_stats_latefusion_bonus1_llama31_microstep2b_truthgap_tactics_only_llm_ruletight1_gtonly_20260616.yaml"
 )
 BASELINE_ROOT = REPO_ROOT / "artifacts_trace_train_stats_latefusion_bonus1_microstep2b_truthgap_tactics_only_llm_gtonly_20260608"
-GT_JSON_PATH = REPO_ROOT / "docs/darpa_attack_eval_ground_truth_2026-05-26.json"
+GT_JSON_PATH = resolve_attack_eval_gt_json(REPO_ROOT)
 REUSED_DIR_NAMES = ["module4_compact", "module5_paths"]
 EVAL_DIR_NAME = "path_reason_eval_tactics_only_llm"
 

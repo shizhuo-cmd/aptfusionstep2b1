@@ -1,11 +1,11 @@
 ﻿from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 from ..common import ensure_dir, iter_jsonl, save_json, save_jsonl
-from ..config import FusionConfig
+from ..config import FusionConfig, resolve_attack_eval_gt_json
 from .episode_aggregation import aggregate_episodes
 from .evidence_normalizer import process_has_download_hint
 from .label_provenance import LabelProvenanceBuilder
@@ -334,6 +334,131 @@ def _within_seconds(current: datetime | None, previous: datetime | None, seconds
     return abs((current - previous).total_seconds()) <= float(seconds)
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _load_gt_windows_for_filter(cfg: FusionConfig) -> tuple[list[dict[str, Any]], Path | None]:
+    mode = str(cfg.path_reason_gt_window_filter_mode or "none").strip().lower()
+    if mode == "none":
+        return [], None
+    repo_root = Path(__file__).resolve().parents[3]
+    gt_path = resolve_attack_eval_gt_json(repo_root, cfg.attack_eval_gt_json_path)
+    if not gt_path.exists():
+        raise FileNotFoundError(f"GT window filter reference not found: {gt_path}")
+    payload = json_load(gt_path)
+    raw_windows = payload.get("windows", []) if isinstance(payload, dict) else []
+    if not isinstance(raw_windows, list):
+        return [], gt_path
+    offset_delta = timedelta(minutes=int(cfg.path_reason_gt_time_offset_minutes or 0))
+    pad_delta = timedelta(minutes=int(cfg.path_reason_gt_window_filter_pad_minutes or 0))
+    host = str(cfg.host or "").strip().upper()
+    windows: list[dict[str, Any]] = []
+    for item in raw_windows:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("host", "")).strip().upper() != host:
+            continue
+        if mode == "confirmed_only" and str(item.get("status", "")).strip().lower() != "confirmed":
+            continue
+        start_time = _parse_iso_datetime(item.get("start_time"))
+        end_time = _parse_iso_datetime(item.get("end_time"))
+        if start_time is None or end_time is None:
+            continue
+        effective_start = start_time + offset_delta - pad_delta
+        effective_end = end_time + offset_delta + pad_delta
+        windows.append(
+            {
+                "window_id": str(item.get("window_id", "")).strip(),
+                "status": str(item.get("status", "")).strip(),
+                "base_start_time": start_time.isoformat(),
+                "base_end_time": end_time.isoformat(),
+                "effective_start_time": effective_start,
+                "effective_end_time": effective_end,
+            }
+        )
+    return windows, gt_path
+
+
+def _filter_task_index_by_gt_windows(
+    cfg: FusionConfig,
+    task_index: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    mode = str(cfg.path_reason_gt_window_filter_mode or "none").strip().lower()
+    base_meta: dict[str, Any] = {
+        "gt_window_filter_mode": mode,
+        "gt_window_filter_pad_minutes": int(cfg.path_reason_gt_window_filter_pad_minutes or 0),
+        "gt_time_offset_minutes_applied": int(cfg.path_reason_gt_time_offset_minutes or 0),
+        "input_task_count": len(task_index),
+        "kept_task_ids": [],
+        "filtered_out_task_ids": [],
+        "filtered_out_reasons": {},
+        "window_overlap_counts": {},
+        "gt_window_ids": [],
+        "gt_json_path": "",
+    }
+    if mode == "none":
+        rows = [dict(row) for row in task_index]
+        base_meta["kept_task_ids"] = [
+            str(row.get("task_id", "")).strip()
+            for row in rows
+            if str(row.get("task_id", "")).strip()
+        ]
+        base_meta["kept_task_count"] = len(rows)
+        base_meta["filtered_out_task_count"] = 0
+        return rows, base_meta
+
+    windows, gt_path = _load_gt_windows_for_filter(cfg)
+    base_meta["gt_json_path"] = str(gt_path) if gt_path is not None else ""
+    base_meta["gt_window_ids"] = [str(window["window_id"]) for window in windows if str(window["window_id"]).strip()]
+    base_meta["window_overlap_counts"] = {str(window["window_id"]): 0 for window in windows if str(window["window_id"]).strip()}
+
+    filtered_rows: list[dict[str, Any]] = []
+    for row in task_index:
+        task_id = str(row.get("task_id", "")).strip()
+        row_copy = dict(row)
+        first_timestamp = _parse_iso_datetime(row.get("first_timestamp"))
+        last_timestamp = _parse_iso_datetime(row.get("last_timestamp"))
+        if first_timestamp is None or last_timestamp is None:
+            if task_id:
+                base_meta["filtered_out_task_ids"].append(task_id)
+                base_meta["filtered_out_reasons"][task_id] = "missing_task_time_range"
+            continue
+        overlap_window_ids = [
+            str(window["window_id"])
+            for window in windows
+            if first_timestamp <= window["effective_end_time"] and last_timestamp >= window["effective_start_time"]
+        ]
+        if not overlap_window_ids:
+            if task_id:
+                base_meta["filtered_out_task_ids"].append(task_id)
+                base_meta["filtered_out_reasons"][task_id] = "no_confirmed_window_overlap"
+            continue
+        row_copy["gt_overlap_window_ids"] = overlap_window_ids
+        row_copy["source_first_timestamp"] = first_timestamp.isoformat()
+        row_copy["source_last_timestamp"] = last_timestamp.isoformat()
+        filtered_rows.append(row_copy)
+        if task_id:
+            base_meta["kept_task_ids"].append(task_id)
+        for window_id in overlap_window_ids:
+            if window_id not in base_meta["window_overlap_counts"]:
+                base_meta["window_overlap_counts"][window_id] = 0
+            base_meta["window_overlap_counts"][window_id] += 1
+
+    base_meta["kept_task_count"] = len(filtered_rows)
+    base_meta["filtered_out_task_count"] = len(base_meta["filtered_out_task_ids"])
+    return filtered_rows, base_meta
+
+
 def _semantic_skip_enabled(cfg: FusionConfig, rules: Any) -> bool:
     return bool(cfg.semantic_skip_enabled) and bool(rules.get("semantic_skip.enabled", True))
 
@@ -341,6 +466,7 @@ def _semantic_skip_enabled(cfg: FusionConfig, rules: Any) -> bool:
 def run_module4_compact(cfg: FusionConfig) -> Dict[str, str]:
     rules = load_path_rules(cfg)
     task_index = save_or_load_task_index(cfg)
+    task_index, gt_window_filter_meta = _filter_task_index_by_gt_windows(cfg, task_index)
     priors = load_priors(cfg)
     out_dir = cfg.module4_compact_dir
     ensure_dir(out_dir)
@@ -609,6 +735,13 @@ def run_module4_compact(cfg: FusionConfig) -> Dict[str, str]:
         compact_index.append(
             {
                 "task_id": task_id,
+                "source_first_timestamp": str(
+                    row.get("source_first_timestamp", row.get("first_timestamp", ""))
+                ).strip(),
+                "source_last_timestamp": str(
+                    row.get("source_last_timestamp", row.get("last_timestamp", ""))
+                ).strip(),
+                "gt_overlap_window_ids": list(row.get("gt_overlap_window_ids", []) or []),
                 "raw_event_count": raw_count,
                 "retained_event_count": retained_count,
                 "episode_count": len(episodes),
@@ -624,6 +757,13 @@ def run_module4_compact(cfg: FusionConfig) -> Dict[str, str]:
         summary_rows.append(
             {
                 "task_id": task_id,
+                "source_first_timestamp": str(
+                    row.get("source_first_timestamp", row.get("first_timestamp", ""))
+                ).strip(),
+                "source_last_timestamp": str(
+                    row.get("source_last_timestamp", row.get("last_timestamp", ""))
+                ).strip(),
+                "gt_overlap_window_ids": list(row.get("gt_overlap_window_ids", []) or []),
                 "raw_event_count": raw_count,
                 "after_semantic_skip": retained_count,
                 "after_episode_aggregation": len(episodes),
@@ -642,6 +782,7 @@ def run_module4_compact(cfg: FusionConfig) -> Dict[str, str]:
             "raw_event_count": total_raw,
             "after_semantic_skip": total_retained,
             "after_episode_aggregation": total_episodes,
+            **gt_window_filter_meta,
             "tasks": summary_rows,
             "module3_summary_path": str(_module3_summary_path(cfg)),
             "object_versions_dir": str(_object_versions_dir(cfg)),

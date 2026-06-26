@@ -13,7 +13,7 @@ _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from apt_fusion.config import FusionConfig, load_config
+from apt_fusion.config import FusionConfig, load_config, resolve_attack_eval_gt_json
 from apt_fusion.evaluation.path_reason_eval import apply_gt_time_offset, load_gt_reference, run_evaluation
 from apt_fusion.path_reason.module6_attack_reason import run_module6_reason
 
@@ -23,7 +23,7 @@ CONFIG_PATH = Path(
     "configs/fusion_cloud_trace_train_stats_latefusion_bonus1_llama31_microstep2b_no_attack_priors_gtonly_20260608.yaml"
 )
 REPO_ROOT = Path("/root/autodl-tmp/APT-Fusionstep2b1")
-GT_JSON_PATH = REPO_ROOT / "docs/darpa_attack_eval_ground_truth_2026-05-26.json"
+GT_JSON_PATH = resolve_attack_eval_gt_json(REPO_ROOT)
 COMPARE_SCRIPT = REPO_ROOT / "debug/remote_ops/analyze_attack_prior_effect_20260608.py"
 FULL_PRIOR_ROOT_CANDIDATES = [
     Path("/root/autodl-tmp/APT-Fusionstep2b1/artifacts_trace_train_stats_latefusion_bonus1_microstep2b_gtonly_20260603"),

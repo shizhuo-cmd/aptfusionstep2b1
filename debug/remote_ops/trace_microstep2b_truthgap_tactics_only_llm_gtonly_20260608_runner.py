@@ -13,7 +13,7 @@ _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from apt_fusion.config import FusionConfig, load_config
+from apt_fusion.config import FusionConfig, load_config, resolve_attack_eval_gt_json
 from apt_fusion.evaluation.path_reason_eval import apply_gt_time_offset, load_gt_reference, run_evaluation
 from apt_fusion.path_reason.module6_attack_reason import run_module6_reason
 
@@ -24,7 +24,7 @@ CONFIG_PATH = Path(
 )
 REPO_ROOT = Path("/root/autodl-tmp/APT-Fusionstep2b1")
 DETERMINISTIC_ROOT = REPO_ROOT / "artifacts_trace_train_stats_latefusion_bonus1_microstep2b_truthgap_tactics_only_deterministic_gtonly_20260608"
-GT_JSON_PATH = REPO_ROOT / "docs/darpa_attack_eval_ground_truth_2026-05-26.json"
+GT_JSON_PATH = resolve_attack_eval_gt_json(REPO_ROOT)
 ALIGNMENT_MD_PATH = REPO_ROOT / "docs/trace_report_task_alignment_2026-05-19.md"
 TRUTH_GAP_SCRIPT = REPO_ROOT / "debug/remote_ops/analyze_trace_truth_gap_20260608.py"
 EVAL_DIR_NAME = "path_reason_eval_tactics_only_llm"

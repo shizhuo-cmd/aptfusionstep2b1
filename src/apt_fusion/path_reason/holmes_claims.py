@@ -1,8 +1,21 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import timedelta
 from typing import Any, Dict, Iterable, List
 
+from .chain_semantics import (
+    collect_staged_object_keys,
+    collect_payload_elevate_event_ids,
+    collect_precursor_event_ids,
+    collect_staged_chmod_event_ids,
+    collect_staged_exec_event_ids,
+    is_placeholder_object_key,
+    is_system_service_object_key,
+    item_timestamp,
+    normalize_semantic_text,
+    staged_object_keys_from_bridge_edges,
+)
 
 HOLMES_TTP_CATALOG: dict[str, dict[str, Any]] = {
     "untrusted_read": {
@@ -76,6 +89,22 @@ HOLMES_TTP_CATALOG: dict[str, dict[str, Any]] = {
         "tactic_ids": ("TA0004",),
         "technique_ids": (),
         "allow_tactics": ("TA0004",),
+    },
+    "payload_elevate": {
+        "apt_stage": "Privilege Escalation",
+        "statement": "A staged attacker payload was explicitly elevated or re-launched with higher privileges.",
+        "query_terms": ("payload elevate", "elevate payload", "root payload execution"),
+        "tactic_ids": ("TA0004",),
+        "technique_ids": (),
+        "allow_tactics": ("TA0004",),
+    },
+    "credential_submit": {
+        "apt_stage": "Internal Recon",
+        "statement": "A browser- or mail-mediated interaction submitted credentials or other user-entered secrets to an external site.",
+        "query_terms": ("credential submit", "phishing form", "browser credential post"),
+        "tactic_ids": ("TA0006",),
+        "technique_ids": (),
+        "allow_tactics": ("TA0006",),
     },
     "sensitive_read": {
         "apt_stage": "Internal Recon",
@@ -179,7 +208,11 @@ HOLMES_QUERY_TERMS = {
 
 _RECON_COMMAND_MARKERS = ("whoami", "hostname", "uname", "ifconfig", "ip addr", "netstat", "ss ", "ps ", "id ")
 _ATTACHMENT_MARKERS = ("tcexec", "pine", "rimapd", "attachment", "mail")
-_PRECURSOR_MARKERS = ("tcexec", "command-not-found", "/dev/pts/3", "python3", "chmod", "bash")
+_BROWSER_PROCESS_MARKERS = ("firefox", "chrome", "chromium", "edge", "safari", "thunderbird", "outlook", "mail", "fluxbox")
+_CREDENTIAL_SUBMIT_MAX_RECV_EVENTS = 80
+_CREDENTIAL_SUBMIT_MAX_DURATION_SECONDS = 150.0
+_SENSITIVE_STRONG_LABELS = {"B_READ_CRED", "B_READ_HISTORY"}
+_SENSITIVE_WEAK_LABELS = {"B_READ_BUSINESS", "B_MASS_FILE_ACCESS"}
 _STRONG_EXEC_FAMILY_TAGS = {
     "short_lived_precursor",
     "attachment_or_tcexec_exec",
@@ -194,6 +227,10 @@ _STRONG_EXEC_LABELS = {
     "B_SHELL_SPAWN",
     "B_SCRIPT_EXEC",
 }
+_DELETE_EVENT_TYPES = {"DELETE", "UNLINK", "RENAME"}
+_LOG_PATH_MARKERS = ("/var/log/", ".log", "lastlog", "wtmp", "btmp", "utmp", "messages", "secure")
+_TEMP_CLEANUP_MARKERS = ("/tmp/", "/var/tmp/", "/dev/shm/", "ztmp", "gtcache")
+_STAGED_OBJECT_ROLE_LABELS = {"O_SUSPECT_WRITTEN_EXECUTABLE", "O_FILE_DOWNLOADED", "O_FILE_UPLOADED", "O_FILE_TEMP"}
 
 
 def _normalize_text(value: Any) -> str:
@@ -295,11 +332,191 @@ def _text_blob(dossier: dict[str, Any]) -> str:
                 ]
             )
     parts.extend(str(value).strip() for value in dossier.get("support_object_keys", []) or [] if str(value).strip())
-    for key in ("network_support_summary", "object_lineage_summary", "summary"):
+    for key in (
+        "network_support_summary",
+        "object_lineage_summary",
+        "service_context_summary",
+        "sensitive_object_summary",
+        "cleanup_object_summary",
+        "summary",
+    ):
         text = str(dossier.get(key, "")).strip()
         if text:
             parts.append(text)
     return " ".join(part for part in parts if part).lower()
+
+
+def _core_process_names(dossier: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for item in dossier.get("core_processes", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("name", "process_name", "exe", "process_exe"):
+            text = _normalize_text(item.get(key, ""))
+            if text:
+                names.add(text)
+    return names
+
+
+def _timeline_item_labels(item: dict[str, Any]) -> set[str]:
+    return {str(value).strip() for value in item.get("labels_triggered", []) or [] if str(value).strip()}
+
+
+def _timeline_item_process_guid(item: dict[str, Any]) -> str:
+    return str(item.get("process_guid", "")).strip()
+
+
+def _timeline_item_object_key(item: dict[str, Any]) -> str:
+    return str(item.get("object_key", "")).strip()
+
+
+def _timeline_item_event_type(item: dict[str, Any]) -> str:
+    return str(item.get("event_type", "")).strip().upper()
+
+
+def _timeline_item_object_class(item: dict[str, Any]) -> str:
+    return str(item.get("object_class", "")).strip().lower()
+
+
+def _timeline_item_object_labels(item: dict[str, Any]) -> set[str]:
+    return {str(value).strip() for value in item.get("object_labels", []) or [] if str(value).strip()}
+
+
+def _event_items_by_ids(timeline_by_id: dict[str, dict[str, Any]], event_ids: Iterable[str]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for event_id in event_ids:
+        item = timeline_by_id.get(str(event_id).strip())
+        if isinstance(item, dict):
+            output.append(item)
+    return output
+
+
+def _non_service_sensitive_ids(timeline_by_id: dict[str, dict[str, Any]], event_ids: Iterable[str]) -> list[str]:
+    output: list[str] = []
+    for item in _event_items_by_ids(timeline_by_id, event_ids):
+        event_id = str(item.get("event_id", "")).strip()
+        object_key = _timeline_item_object_key(item)
+        if event_id and object_key and not is_system_service_object_key(object_key):
+            output.append(event_id)
+    return _unique_event_ids(output)
+
+
+def _has_staged_exec_lineage(
+    *,
+    staged_object_keys: set[str],
+    staged_chmod_ids: list[str],
+    staged_exec_ids: list[str],
+    bridge_exec_ids: list[str],
+) -> bool:
+    return bool(staged_object_keys or staged_chmod_ids or staged_exec_ids or bridge_exec_ids)
+
+
+def _flatten_ordered_pairs(pairs: list[tuple[str, str]]) -> list[str]:
+    output: list[str] = []
+    for earlier_id, later_id in pairs:
+        if earlier_id and earlier_id not in output:
+            output.append(earlier_id)
+        if later_id and later_id not in output:
+            output.append(later_id)
+    return output
+
+
+def _ordered_signal_pairs_within_window(
+    dossier: dict[str, Any],
+    earlier_ids: Iterable[str],
+    later_ids: Iterable[str],
+    *,
+    max_minutes: int,
+) -> list[tuple[str, str]]:
+    positions = _timeline_position_by_id(dossier)
+    timeline_by_id = _timeline_by_id(dossier)
+    output: list[tuple[str, str]] = []
+    for earlier_id in _unique_event_ids(earlier_ids):
+        earlier_item = timeline_by_id.get(earlier_id)
+        if not isinstance(earlier_item, dict):
+            continue
+        earlier_pos = positions.get(earlier_id)
+        earlier_ts = item_timestamp(earlier_item)
+        for later_id in _unique_event_ids(later_ids):
+            later_item = timeline_by_id.get(later_id)
+            if not isinstance(later_item, dict):
+                continue
+            later_pos = positions.get(later_id)
+            if earlier_pos is None or later_pos is None or earlier_pos >= later_pos:
+                continue
+            later_ts = item_timestamp(later_item)
+            if earlier_ts is not None and later_ts is not None:
+                delta = later_ts - earlier_ts
+                if delta < timedelta(0) or delta > timedelta(minutes=max_minutes):
+                    continue
+            output.append((earlier_id, later_id))
+    return output
+
+
+def _pairs_share_process(
+    timeline_by_id: dict[str, dict[str, Any]],
+    pairs: list[tuple[str, str]],
+) -> bool:
+    for earlier_id, later_id in pairs:
+        earlier_item = timeline_by_id.get(earlier_id)
+        later_item = timeline_by_id.get(later_id)
+        if not isinstance(earlier_item, dict) or not isinstance(later_item, dict):
+            continue
+        earlier_process = _timeline_item_process_guid(earlier_item)
+        later_process = _timeline_item_process_guid(later_item)
+        if earlier_process and earlier_process == later_process:
+            return True
+    return False
+
+
+def _has_lineage_or_bridge_support(dossier: dict[str, Any]) -> bool:
+    if str(dossier.get("object_lineage_summary", "")).strip():
+        return True
+    if any(str(value).strip() for value in dossier.get("support_relations", []) or []):
+        return True
+    return any(isinstance(edge, dict) for edge in dossier.get("bridge_edges", []) or [])
+
+
+def _is_log_cleanup_item(item: dict[str, Any]) -> bool:
+    labels = _timeline_item_labels(item).union(_timeline_item_object_labels(item))
+    if "B_DELETE_LOG" in labels or "O_LOG_ARTIFACT" in labels:
+        return True
+    if _timeline_item_object_class(item) == "log_file":
+        return True
+    object_key = _normalize_text(item.get("object_key", ""))
+    return bool(object_key and any(marker in object_key for marker in _LOG_PATH_MARKERS))
+
+
+def _cleanup_event_ids(
+    dossier: dict[str, Any],
+    *,
+    strong_exec_context: bool,
+    staged_object_keys: set[str],
+) -> tuple[list[str], list[str]]:
+    if not strong_exec_context:
+        return [], []
+    log_cleanup_ids: list[str] = []
+    staged_cleanup_ids: list[str] = []
+    timeline_by_id = _timeline_by_id(dossier)
+    staged_cleanup_keys = collect_staged_object_keys(
+        timeline_by_id.values(),
+        suspicious_object_keys=staged_object_keys,
+    )
+    for item in timeline_by_id.values():
+        event_id = str(item.get("event_id", "")).strip()
+        if not event_id or _timeline_item_event_type(item) not in _DELETE_EVENT_TYPES:
+            continue
+        object_key = _normalize_text(item.get("object_key", ""))
+        if not object_key or is_placeholder_object_key(object_key):
+            continue
+        if _is_log_cleanup_item(item):
+            log_cleanup_ids.append(event_id)
+            continue
+        staged_object_like = bool(_timeline_item_object_labels(item).intersection(_STAGED_OBJECT_ROLE_LABELS))
+        temp_cleanup_like = any(marker in object_key for marker in _TEMP_CLEANUP_MARKERS)
+        if (object_key in staged_cleanup_keys or staged_object_like or temp_cleanup_like) and not is_system_service_object_key(object_key):
+            staged_cleanup_ids.append(event_id)
+    return _unique_event_ids(log_cleanup_ids), _unique_event_ids(staged_cleanup_ids)
 
 
 def _bridge_exec_event_ids(dossier: dict[str, Any]) -> list[str]:
@@ -355,17 +572,68 @@ def _has_strong_exec_context(
     return bool(exec_ids and family_tags.intersection({"callback_c2", "cleanup_delete", *tuple(_STRONG_EXEC_FAMILY_TAGS)}))
 
 
+def _is_browser_mail_context(dossier: dict[str, Any], blob: str) -> bool:
+    family_tags = _dossier_family_tags(dossier)
+    if "mail_browser_context_tail" in family_tags:
+        return True
+    process_names = _core_process_names(dossier)
+    return any(any(marker in name for marker in _BROWSER_PROCESS_MARKERS) for name in process_names) or "browser" in blob
+
+
+def _is_browser_only_context(dossier: dict[str, Any], blob: str) -> bool:
+    if not _is_browser_mail_context(dossier, blob):
+        return False
+    process_names = _core_process_names(dossier)
+    if not process_names:
+        return False
+    return all(any(marker in name for marker in _BROWSER_PROCESS_MARKERS) for name in process_names)
+
+
+def _timeline_span_seconds(dossier: dict[str, Any]) -> float | None:
+    values: list[Any] = []
+    for item in dossier.get("evidence_timeline", []) or []:
+        if not isinstance(item, dict):
+            continue
+        value = item_timestamp(item)
+        if value is not None:
+            values.append(value)
+    if len(values) < 2:
+        return None
+    return max(0.0, float((max(values) - min(values)).total_seconds()))
+
+
+def _network_support_counts(dossier: dict[str, Any]) -> dict[str, int]:
+    summary = str(dossier.get("network_support_summary", "")).strip()
+    if not summary:
+        return {}
+    output: dict[str, int] = {}
+    for chunk in summary.split(";"):
+        part = chunk.strip()
+        if "=" not in part:
+            continue
+        key, _, value = part.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            continue
+        try:
+            output[key] = int(value)
+        except ValueError:
+            continue
+    return output
+
+
 def _candidate_precursor_ids(dossier: dict[str, Any], blob: str) -> list[str]:
-    provided = _unique_event_ids(str(value).strip() for value in dossier.get("precursor_event_ids", []) or [])
-    if provided:
-        return provided[:8]
-    if not any(marker in blob for marker in _PRECURSOR_MARKERS):
+    items = [item for item in dossier.get("evidence_timeline", []) or [] if isinstance(item, dict)]
+    if not items:
         return []
-    items = _timeline_items_for_predicate(
-        dossier,
-        lambda item: any(marker in _normalize_text(item.get("description", "")) or marker in _normalize_text(item.get("object_key", "")) for marker in _PRECURSOR_MARKERS),
-    )
-    return _event_ids_from_items(items)
+    suspicious_object_keys = staged_object_keys_from_bridge_edges(dossier.get("bridge_edges", []) or [])
+    provided_ids = _unique_event_ids(str(value).strip() for value in dossier.get("precursor_event_ids", []) or [])
+    if provided_ids:
+        item_by_id = {str(item.get("event_id", "")).strip(): item for item in items if str(item.get("event_id", "")).strip()}
+        provided_items = [item_by_id[event_id] for event_id in provided_ids if event_id in item_by_id]
+        return collect_precursor_event_ids(provided_items, suspicious_object_keys=suspicious_object_keys, limit=8)
+    return collect_precursor_event_ids(items, suspicious_object_keys=suspicious_object_keys, limit=8)
 
 
 def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
@@ -373,23 +641,36 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
     labels = _core_process_labels(dossier)
     blob = _text_blob(dossier)
 
-    external_recv_ids = _event_ids_from_items(_timeline_items_for_labels(dossier, {"B_EXTERNAL_RECV"}))
-    external_send_ids = _event_ids_from_items(_timeline_items_for_labels(dossier, {"B_EXTERNAL_SEND"}))
+    external_recv_ids = _event_ids_from_items(
+        _timeline_items_for_predicate(
+            dossier,
+            lambda item: "B_EXTERNAL_RECV" in _timeline_item_labels(item)
+            or (_timeline_item_object_class(item) == "external_ip" and _timeline_item_event_type(item) == "RECV"),
+        )
+    )
+    external_send_ids = _event_ids_from_items(
+        _timeline_items_for_predicate(
+            dossier,
+            lambda item: "B_EXTERNAL_SEND" in _timeline_item_labels(item)
+            or (_timeline_item_object_class(item) == "external_ip" and _timeline_item_event_type(item) == "SEND"),
+        )
+    )
     lateral_ids = _event_ids_from_items(_timeline_items_for_labels(dossier, {"B_LATERAL_CONNECT"}))
     exec_ids = _event_ids_from_items(
         _timeline_items_for_labels(dossier, {"B_EXEC_SUSPECT_WRITTEN", "B_EXEC_DOWNLOADED", "B_EXEC_UPLOADED", "B_EXEC_TEMP"})
     )
-    sensitive_ids = _event_ids_from_items(
-        _timeline_items_for_labels(dossier, {"B_READ_CRED", "B_READ_HISTORY", "B_READ_BUSINESS", "B_MASS_FILE_ACCESS"})
-    )
-    history_ids = _event_ids_from_items(_timeline_items_for_labels(dossier, {"B_READ_HISTORY"}))
-    business_ids = _event_ids_from_items(_timeline_items_for_labels(dossier, {"B_READ_BUSINESS", "B_MASS_FILE_ACCESS"}))
-    persistence_ids = _event_ids_from_items(_timeline_items_for_labels(dossier, {"B_WRITE_PERSISTENCE", "B_WRITE_PRIV_CONFIG"}))
-    log_delete_ids = _event_ids_from_items(
+    strong_sensitive_ids = _event_ids_from_items(
         _timeline_items_for_predicate(
             dossier,
-            lambda item: "B_DELETE_LOG" in {str(value).strip() for value in item.get("labels_triggered", []) or [] if str(value).strip()}
-            or ("log" in _normalize_text(item.get("object_key", "")) and str(item.get("event_type", "")).strip().upper() in {"DELETE", "UNLINK", "RENAME"}),
+            lambda item: _timeline_item_event_type(item) == "READ"
+            and bool(_timeline_item_labels(item).intersection(_SENSITIVE_STRONG_LABELS)),
+        )
+    )
+    weak_sensitive_ids = _event_ids_from_items(
+        _timeline_items_for_predicate(
+            dossier,
+            lambda item: _timeline_item_event_type(item) == "READ"
+            and bool(_timeline_item_labels(item).intersection(_SENSITIVE_WEAK_LABELS)),
         )
     )
     recon_command_ids = _event_ids_from_items(
@@ -418,13 +699,6 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
             lambda item: any(term in _normalize_text(item.get("description", "")) for term in ("mprotect", "mem exec", "mprotect_exec", "virtualalloc")),
         )
     )
-    chmod_ids = _event_ids_from_items(
-        _timeline_items_for_predicate(
-            dossier,
-            lambda item: str(item.get("event_type", "")).strip().upper() in {"CHMOD", "MODIFY_FILE_ATTRIBUTES"}
-            or "chmod" in _normalize_text(item.get("description", "")),
-        )
-    )
     attachment_ids = _event_ids_from_items(
         _timeline_items_for_predicate(
             dossier,
@@ -436,7 +710,7 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
     temp_remove_ids = _event_ids_from_items(
         _timeline_items_for_predicate(
             dossier,
-            lambda item: str(item.get("event_type", "")).strip().upper() in {"DELETE", "UNLINK", "RENAME"}
+            lambda item: str(item.get("event_type", "")).strip().upper() in _DELETE_EVENT_TYPES
             and any(token in _normalize_text(item.get("object_key", "")) for token in ("/tmp/", "temp", "gtcache", "ztmp")),
         )
     )
@@ -466,6 +740,14 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
             dossier,
             lambda item: any(term in _normalize_text(item.get("description", "")) for term in (" setuid", " su ", "switch user")),
         )
+    )
+    browser_only_context = _is_browser_only_context(dossier, blob)
+    browser_mail_context = _is_browser_mail_context(dossier, blob)
+    explicit_callback_context = bool(
+        shell_exec_ids
+        or precursor_ids
+        or attachment_ids
+        or (bridge_exec_ids and not browser_only_context)
     )
 
     claims: list[dict[str, Any]] = []
@@ -500,41 +782,119 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
 
     if external_recv_ids:
         add_claim("untrusted_read", external_recv_ids, 0.74, ["external_recv"])
+    staged_object_keys = staged_object_keys_from_bridge_edges(dossier.get("bridge_edges", []) or [])
+    staged_chmod_ids = collect_staged_chmod_event_ids(
+        dossier.get("evidence_timeline", []) or [],
+        suspicious_object_keys=staged_object_keys,
+        limit=8,
+    )
+    staged_exec_ids = collect_staged_exec_event_ids(
+        dossier.get("evidence_timeline", []) or [],
+        suspicious_object_keys=staged_object_keys,
+        limit=8,
+    )
+    staged_lineage = _has_staged_exec_lineage(
+        staged_object_keys=staged_object_keys,
+        staged_chmod_ids=staged_chmod_ids,
+        staged_exec_ids=staged_exec_ids,
+        bridge_exec_ids=bridge_exec_ids,
+    )
+    weak_sensitive_non_service_ids = _non_service_sensitive_ids(timeline_by_id, weak_sensitive_ids)
+    raw_discovery_signal = bool(len(scan_ids) >= 2 or (scan_ids and lateral_ids))
+    raw_log_cleanup_ids, raw_staged_cleanup_ids = _cleanup_event_ids(
+        dossier,
+        strong_exec_context=strong_exec_context,
+        staged_object_keys=staged_object_keys,
+    )
     if mem_exec_ids and (external_recv_ids or precursor_ids):
         add_claim("make_mem_exec", mem_exec_ids + external_recv_ids + precursor_ids, 0.77, ["mem_exec", "precursor_dependency"])
-    if chmod_ids and (external_recv_ids or bridge_exec_ids or precursor_ids):
-        add_claim("make_file_exec", chmod_ids + bridge_exec_ids + precursor_ids, 0.78, ["chmod_exec", "staged_object"])
+    if staged_chmod_ids:
+        add_claim("make_file_exec", staged_chmod_ids + staged_exec_ids + bridge_exec_ids, 0.78, ["chmod_exec", "staged_object"])
     if bridge_exec_ids:
         add_claim("untrusted_file_exec", bridge_exec_ids + external_recv_ids, 0.84, ["bridge_exec", "staged_object"])
     if attachment_ids:
         add_claim("attachment_user_exec", attachment_ids + bridge_exec_ids, 0.82, ["attachment_markers"])
     if shell_exec_ids:
         add_claim("shell_exec", shell_exec_ids + precursor_ids[:4], 0.78, ["interpreter_exec"])
-    if (external_send_ids or external_recv_ids) and strong_exec_context:
+    credential_submit_pairs = _ordered_signal_pairs_within_window(
+        dossier,
+        external_recv_ids,
+        external_send_ids,
+        max_minutes=10,
+    )
+    network_support_counts = _network_support_counts(dossier)
+    credential_submit_recv_total = network_support_counts.get("external_recv", len(external_recv_ids))
+    credential_submit_span_seconds = _timeline_span_seconds(dossier)
+    credential_submit_short_burst = credential_submit_recv_total <= _CREDENTIAL_SUBMIT_MAX_RECV_EVENTS and (
+        credential_submit_span_seconds is None
+        or credential_submit_span_seconds <= _CREDENTIAL_SUBMIT_MAX_DURATION_SECONDS
+    )
+    if (
+        browser_mail_context
+        and browser_only_context
+        and credential_submit_pairs
+        and not explicit_callback_context
+        and credential_submit_short_burst
+    ):
+        add_claim("credential_submit", _flatten_ordered_pairs(credential_submit_pairs), 0.77, ["browser_form_submit"])
+    if external_send_ids and strong_exec_context and (not browser_only_context or explicit_callback_context):
         add_claim("cnc_communication", external_send_ids + external_recv_ids, 0.8, ["external_c2"])
     if sudo_ids:
         add_claim("sudo_exec", sudo_ids, 0.8, ["sudo"])
     if su_ids:
         add_claim("switch_su", su_ids, 0.8, ["identity_switch"])
-    if (sensitive_ids or history_ids or business_ids) and strong_exec_context:
-        add_claim("sensitive_read", sensitive_ids + history_ids + business_ids, 0.82, ["sensitive_local_read"])
+    payload_elevate_ids = collect_payload_elevate_event_ids(
+        dossier.get("evidence_timeline", []) or [],
+        suspicious_object_keys=staged_object_keys,
+        limit=8,
+    )
+    if payload_elevate_ids and strong_exec_context:
+        add_claim("payload_elevate", payload_elevate_ids + bridge_exec_ids[:2], 0.81, ["payload_elevate"])
+    sensitive_read_ids: list[str] = []
+    sensitive_read_signals: list[str] = []
+    if strong_sensitive_ids and strong_exec_context:
+        sensitive_read_ids.extend(strong_sensitive_ids)
+        sensitive_read_signals.append("sensitive_strong_read")
+    weak_sensitive_support = bool(
+        raw_discovery_signal
+        or raw_log_cleanup_ids
+        or raw_staged_cleanup_ids
+        or staged_lineage
+        or (external_send_ids and strong_exec_context and (not browser_only_context or explicit_callback_context))
+    )
+    if weak_sensitive_non_service_ids and strong_exec_context and weak_sensitive_support:
+        sensitive_read_ids.extend(weak_sensitive_non_service_ids)
+        sensitive_read_signals.append("sensitive_weak_read")
+    sensitive_read_ids = _unique_event_ids(sensitive_read_ids)
+    if sensitive_read_ids:
+        add_claim("sensitive_read", sensitive_read_ids, 0.82, sensitive_read_signals or ["sensitive_local_read"])
     if recon_command_ids:
         add_claim("sensitive_command", recon_command_ids, 0.78, ["recon_commands"])
-    if len(scan_ids) >= 2 or (scan_ids and lateral_ids):
+    if raw_discovery_signal:
         add_claim("network_service_discovery", scan_ids + lateral_ids, 0.82, ["scan_burst"])
     if internal_send_ids:
         add_claim("send_internal", internal_send_ids, 0.76, ["internal_connect"])
-    if (
-        external_send_ids
-        and (sensitive_ids or business_ids or history_ids)
-        and strong_exec_context
-        and _has_ordered_signal_flow(dossier, sensitive_ids + business_ids + history_ids, external_send_ids)
+    leak_pairs = _ordered_signal_pairs_within_window(
+        dossier,
+        sensitive_read_ids,
+        external_send_ids,
+        max_minutes=10,
+    )
+    if leak_pairs and strong_exec_context and (
+        _pairs_share_process(timeline_by_id, leak_pairs) or _has_lineage_or_bridge_support(dossier)
     ):
-        add_claim("sensitive_leak", external_send_ids + sensitive_ids + business_ids + history_ids, 0.83, ["sensitive_plus_external_send"])
-    if log_delete_ids:
-        add_claim("clear_logs", log_delete_ids, 0.82, ["log_cleanup"])
-    if temp_remove_ids and (sensitive_ids or business_ids or history_ids):
-        add_claim("sensitive_temp_rm", temp_remove_ids + sensitive_ids + business_ids + history_ids, 0.78, ["temp_cleanup_after_collection"])
+        add_claim("sensitive_leak", _flatten_ordered_pairs(leak_pairs), 0.83, ["sensitive_plus_external_send"])
+    log_cleanup_ids, staged_cleanup_ids = raw_log_cleanup_ids, raw_staged_cleanup_ids
+    clear_logs_ids = _unique_event_ids(log_cleanup_ids + staged_cleanup_ids)
+    clear_logs_signals: list[str] = []
+    if log_cleanup_ids:
+        clear_logs_signals.append("log_cleanup")
+    if staged_cleanup_ids:
+        clear_logs_signals.append("staged_cleanup")
+    if clear_logs_ids:
+        add_claim("clear_logs", clear_logs_ids, 0.82, clear_logs_signals or ["log_cleanup"])
+    if temp_remove_ids and sensitive_read_ids:
+        add_claim("sensitive_temp_rm", temp_remove_ids + sensitive_read_ids, 0.78, ["temp_cleanup_after_collection"])
     if temp_remove_ids and bridge_exec_ids:
         add_claim("untrusted_file_rm", temp_remove_ids + bridge_exec_ids, 0.76, ["cleanup_staged_object"])
     if precursor_ids:
@@ -549,6 +909,8 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
         "cnc_communication": ("untrusted_file_exec", "attachment_user_exec", "shell_exec", "interpreter_precursor_chain"),
         "sudo_exec": ("shell_exec",),
         "switch_su": ("shell_exec",),
+        "payload_elevate": ("untrusted_file_exec", "make_file_exec", "attachment_user_exec", "shell_exec"),
+        "credential_submit": ("untrusted_read",),
         "sensitive_read": ("untrusted_file_exec", "shell_exec", "interpreter_precursor_chain"),
         "sensitive_command": ("untrusted_file_exec", "shell_exec", "interpreter_precursor_chain"),
         "network_service_discovery": ("shell_exec", "cnc_communication", "attachment_user_exec"),

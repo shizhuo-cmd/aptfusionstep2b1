@@ -11,6 +11,10 @@ from statistics import median
 from typing import Any, Iterable
 
 from ..common import ensure_dir, load_json, save_json
+from ..config import resolve_attack_eval_gt_json
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_GT_JSON_PATH = resolve_attack_eval_gt_json(_REPO_ROOT)
 
 _ATTACK_ID_PATTERN = re.compile(r"T\d{4}(?:[./]\d{3})?")
 _TACTIC_SPLIT_PATTERN = re.compile(r"[|,，/+\s]+")
@@ -40,6 +44,7 @@ _TACTIC_ID_TO_CANONICAL = {
 _RISK_ORDER = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 _MEDIUM_OR_HIGH = {"MEDIUM", "HIGH"}
 _HIGH_ONLY = {"HIGH"}
+_CONFIRMED_CONTINUATION_MAX_GAP_MINUTES = 15
 
 
 @dataclass
@@ -880,7 +885,7 @@ def time_match_for_window(
 ) -> PathWindowMatch:
     padded_start, padded_end = _padded_window(window, pad_minutes)
     intersection = _overlap_seconds(path.start_time, path.end_time, padded_start, padded_end)
-    ratio = intersection / _path_duration_seconds(path)
+    point_like_path = bool(path.start_time is not None and path.end_time is not None and path.start_time == path.end_time)
     midpoint = _midpoint(path.start_time, path.end_time)
     midpoint_in_window = bool(
         midpoint is not None and padded_start is not None and padded_end is not None and padded_start <= midpoint <= padded_end
@@ -893,9 +898,14 @@ def time_match_for_window(
         and padded_start <= path.start_time <= padded_end
         and padded_start <= path.end_time <= padded_end
     )
+    if point_like_path and fully_inside and intersection <= 0:
+        # Treat an in-window point event as one effective second so it can
+        # participate in the same overlap logic as non-zero-duration paths.
+        intersection = 1.0
+    ratio = intersection / _path_duration_seconds(path)
     strict_time_match = bool(ratio >= 0.8 or fully_inside)
-    primary_time_match = bool(intersection > 0 and (ratio >= 0.5 or midpoint_in_window))
-    loose_time_match = bool(intersection > 0)
+    primary_time_match = bool((intersection > 0 or fully_inside) and (ratio >= 0.5 or midpoint_in_window or fully_inside))
+    loose_time_match = bool(intersection > 0 or fully_inside)
     near_miss = False
     if not loose_time_match and padded_start is not None and padded_end is not None and path.start_time and path.end_time:
         gap_seconds = min(
@@ -986,12 +996,157 @@ def assign_paths_to_windows(
         assignments.append(
             {
                 **path.to_dict(),
-                **chosen_match.to_dict(),
+                **{**chosen_match.to_dict(), "match_type": match_type},
                 "assigned_window_id": chosen_window.window_id,
                 "assigned_status": match_type,
             }
         )
+    return _reattach_confirmed_continuations(assignments, predicted_paths, gt_windows)
+
+
+def _reattach_confirmed_continuations(
+    assignments: list[dict[str, Any]],
+    predicted_paths: list[PredictedPath],
+    gt_windows: list[GTWindow],
+) -> list[dict[str, Any]]:
+    if not assignments:
+        return assignments
+    path_by_id = {path.path_id: path for path in predicted_paths}
+    window_by_id = {window.window_id: window for window in gt_windows}
+    confirmed_by_task: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in assignments:
+        if str(item.get("assigned_status", "")) != "CONFIRMED_MATCH":
+            continue
+        host = str(item.get("host", "")).strip().upper()
+        task_id = str(item.get("task_id", "")).strip()
+        if not host or not task_id:
+            continue
+        confirmed_by_task.setdefault((host, task_id), []).append(item)
+    for item in assignments:
+        if str(item.get("assigned_status", "")) != "OFF_WINDOW":
+            continue
+        path_id = str(item.get("path_id", "")).strip()
+        task_id = str(item.get("task_id", "")).strip()
+        host = str(item.get("host", "")).strip().upper()
+        path = path_by_id.get(path_id)
+        if path is None or not task_id or not host:
+            continue
+        anchor = _best_confirmed_continuation_anchor(
+            path,
+            confirmed_by_task.get((host, task_id), []),
+            path_by_id=path_by_id,
+            window_by_id=window_by_id,
+        )
+        if anchor is None:
+            continue
+        anchor_window_id = str(anchor.get("assigned_window_id") or "")
+        anchor_path_id = str(anchor.get("path_id", "")).strip()
+        item["window_id"] = anchor_window_id
+        item["assigned_window_id"] = anchor_window_id
+        item["assigned_status"] = "CONFIRMED_CONTINUATION"
+        item["match_type"] = "CONFIRMED_CONTINUATION"
+        item["continuation_anchor_path_id"] = anchor_path_id
+        item["continuation_reason"] = "same_task_nearby_subset"
     return assignments
+
+
+def _best_confirmed_continuation_anchor(
+    path: PredictedPath,
+    confirmed_items: list[dict[str, Any]],
+    *,
+    path_by_id: dict[str, PredictedPath],
+    window_by_id: dict[str, GTWindow],
+) -> dict[str, Any] | None:
+    candidates: list[tuple[int, float, float, dict[str, Any]]] = []
+    off_tactics = {_canonical_tactic_name(value) for value in path.predicted_tactics if _canonical_tactic_name(value)}
+    off_processes = {str(value).strip() for value in path.process_chain if str(value).strip()}
+    off_bridges = {str(value).strip() for value in path.bridge_objects if str(value).strip()}
+    for item in confirmed_items:
+        anchor_path = path_by_id.get(str(item.get("path_id", "")).strip())
+        window = window_by_id.get(str(item.get("assigned_window_id") or "").strip())
+        if anchor_path is None or window is None:
+            continue
+        if not _is_confirmed_continuation_candidate(
+            path,
+            anchor_path,
+            window,
+            off_tactics=off_tactics,
+            off_processes=off_processes,
+            off_bridges=off_bridges,
+        ):
+            continue
+        shared_process_count = len(off_processes.intersection({str(value).strip() for value in anchor_path.process_chain if str(value).strip()}))
+        overlap_seconds = _overlap_seconds(path.start_time, path.end_time, anchor_path.start_time, anchor_path.end_time)
+        gap_seconds = _continuation_gap_seconds(path, window)
+        candidates.append((shared_process_count, float(overlap_seconds), -float(gap_seconds), item))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: (-item[0], -item[1], -item[2], str(item[3].get("path_id", ""))))[0][3]
+
+
+def _is_confirmed_continuation_candidate(
+    path: PredictedPath,
+    anchor_path: PredictedPath,
+    window: GTWindow,
+    *,
+    off_tactics: set[str],
+    off_processes: set[str],
+    off_bridges: set[str],
+) -> bool:
+    if path.start_time is None or path.end_time is None or window.end_time is None:
+        return False
+    anchor_processes = {str(value).strip() for value in anchor_path.process_chain if str(value).strip()}
+    anchor_bridges = {str(value).strip() for value in anchor_path.bridge_objects if str(value).strip()}
+    if not off_processes.intersection(anchor_processes) and not off_bridges.intersection(anchor_bridges):
+        return False
+    if off_tactics:
+        anchor_tactics = {_canonical_tactic_name(value) for value in anchor_path.predicted_tactics if _canonical_tactic_name(value)}
+        if not anchor_tactics or not off_tactics.issubset(anchor_tactics):
+            return False
+    overlap_anchor = _overlap_seconds(path.start_time, path.end_time, anchor_path.start_time, anchor_path.end_time) > 0
+    if overlap_anchor:
+        return True
+    return _continuation_gap_seconds(path, window) <= float(_CONFIRMED_CONTINUATION_MAX_GAP_MINUTES * 60)
+
+
+def _continuation_gap_seconds(path: PredictedPath, window: GTWindow) -> float:
+    if path.start_time is None or window.end_time is None:
+        return math.inf
+    return max(0.0, float((path.start_time - window.end_time).total_seconds()))
+
+
+def _path_assignment_match(item: dict[str, Any]) -> PathWindowMatch:
+    return PathWindowMatch(
+        path_id=str(item.get("path_id", "")),
+        match_type=str(item.get("assigned_status") or item.get("match_type") or "UNASSIGNED"),
+        path_in_window_ratio=float(item.get("path_in_window_ratio", 0.0) or 0.0),
+        intersection_seconds=float(item.get("intersection_seconds", 0.0) or 0.0),
+        midpoint_in_window=bool(item.get("midpoint_in_window", False)),
+        strict_time_match=bool(item.get("strict_time_match", False)),
+        primary_time_match=bool(item.get("primary_time_match", False)),
+        loose_time_match=bool(item.get("loose_time_match", False)),
+        near_miss_time=bool(item.get("near_miss_time", False)),
+        window_id=str(item.get("assigned_window_id") or item.get("window_id") or "") or None,
+    )
+
+
+def _assigned_confirmed_paths_by_window(
+    predicted_paths: list[PredictedPath],
+    path_assignments: list[dict[str, Any]],
+) -> dict[str, list[tuple[PredictedPath, PathWindowMatch]]]:
+    by_key = {(path.host, path.path_id): path for path in predicted_paths}
+    grouped: dict[str, list[tuple[PredictedPath, PathWindowMatch]]] = {}
+    for item in path_assignments:
+        if str(item.get("assigned_status", "")) not in {"CONFIRMED_MATCH", "CONFIRMED_CONTINUATION"}:
+            continue
+        window_id = str(item.get("assigned_window_id") or "")
+        if not window_id:
+            continue
+        path = by_key.get((str(item.get("host", "")), str(item.get("path_id", ""))))
+        if path is None:
+            continue
+        grouped.setdefault(window_id, []).append((path, _path_assignment_match(item)))
+    return grouped
 
 
 def _best_near_miss(
@@ -1041,6 +1196,7 @@ def evaluate_path_reason(
     paths_by_host: dict[str, list[PredictedPath]] = {}
     for path in predicted_paths:
         paths_by_host.setdefault(path.host, []).append(path)
+    confirmed_paths_by_window = _assigned_confirmed_paths_by_window(predicted_paths, path_assignments)
     confirmed_windows = [
         window
         for window in strict_windows
@@ -1079,21 +1235,8 @@ def evaluate_path_reason(
     tactic_pred_total = 0
 
     for window in confirmed_windows:
-        host_paths = paths_by_host.get(window.host, [])
-        matches = [
-            (
-                path,
-                time_match_for_window(
-                    path,
-                    window,
-                    pad_minutes=pad_minutes,
-                    near_miss_minutes=near_miss_minutes,
-                ),
-            )
-            for path in host_paths
-        ]
-        primary_paths = [item for item in matches if item[1].primary_time_match]
-        strict_paths = [item for item in matches if item[1].strict_time_match]
+        primary_paths = confirmed_paths_by_window.get(window.window_id, [])
+        strict_paths = [item for item in primary_paths if item[1].strict_time_match]
         confirmed_recall_paths = [item for item in primary_paths if item[0].risk_level in _MEDIUM_OR_HIGH]
         strict_recall_paths = [item for item in strict_paths if item[0].risk_level in _MEDIUM_OR_HIGH]
         high_risk_paths = [item for item in primary_paths if item[0].risk_level in _HIGH_ONLY]
@@ -1168,6 +1311,7 @@ def evaluate_path_reason(
         warnings: list[str] = []
         if not matched_top:
             warnings.append("no primary-time matched path")
+        host_paths = paths_by_host.get(window.host, [])
         mapping_scope = matched_top[0][0].attack_mapping_scope if matched_top else (host_paths[0].attack_mapping_scope if host_paths else "full")
         if mapping_scope != "tactics_only" and not pred_techniques:
             warnings.append("no ATT&CK technique emitted for top matched paths")
@@ -1442,7 +1586,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifacts-dir", default="", help="Artifact root containing module5_paths and module6_reason.")
     parser.add_argument("--strict-md", default="", help="Path to ALL_HOSTS_ATTCK_STRICT_MAPPING.md")
     parser.add_argument("--broad-md", default="", help="Optional path to ALL_HOSTS_ATTACK_ATTCK_MAPPING.md")
-    parser.add_argument("--gt-json", default="", help="Optional canonical GT JSON file built from official DARPA attack docs.")
+    parser.add_argument(
+        "--gt-json",
+        default=str(_DEFAULT_GT_JSON_PATH),
+        help="Canonical GT JSON file used for attack-window evaluation. Defaults to the enriched E3-report GT.",
+    )
     parser.add_argument("--output-dir", default="", help="Output directory. Defaults to <artifacts-dir>/path_reason_eval")
     parser.add_argument("--host", default="", help="Host name, for example TRACE/THEIA/CADETS.")
     parser.add_argument("--match-top-n", type=int, default=5, help="Top-N matched paths per window for ATT&CK union.")
