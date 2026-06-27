@@ -958,3 +958,160 @@ artifact：
   - 不能误删被稳定线复用的目录
   - 不能删掉被软链接引用的 `module5_paths` 或其他上游快照
 - 若实验中途终止，也应在文档和产物命名里明确标注“中止 / 未生效 / 失败”的原因。
+
+## 10. 2026-06-27 新增记录
+
+### 10.1 代码与同步状态
+
+- 本地仓库 `D:\daima\APT-Fusionstep2b1` 已新增一次明确检查点提交：
+  - `7de769e feat: checkpoint theia-trace e3gt windowgate step4m baselines and upstream diagnostics`
+- 该提交已经成功写入本地 git 历史。
+- 同时，当前源码快照已经通过 `pscp + tar` 的方式同步到云端：
+  - 远端源码目录：`/root/autodl-tmp/APT-Fusionstep2b1`
+- 这次同步后的云端源码可视为“本地当前版本”的可执行副本。
+
+### 10.2 GitHub 推送现状
+
+- 这次没有完成 GitHub 推送。
+- 结论不是代码问题，而是当前机器缺少可直接复用的 GitHub 凭据：
+  - 远端地址是 `https://github.com/shizhuo-cmd/aptfusionstep2b1.git`
+  - 本机 `credential.helper=manager`
+  - 本机没有 `gh` 登录
+  - 本机 `~/.ssh` 下也没有 GitHub 私钥，只有 `config` 和 `known_hosts`
+- 因此当前状态应记为：
+  - `本地提交成功`
+  - `云端源码同步成功`
+  - `GitHub 推送未完成，原因是凭据缺失`
+
+### 10.3 云端失败产物清理
+
+- 已在云端清理 `/root/autodl-tmp/APT-Fusionstep2b1` 下名称带 `*_failed_*` 的失败实验目录。
+- 这一步的目的：
+  - 降低磁盘占用
+  - 避免后续继续把失败产物误认成稳定基线
+- 清理策略：
+  - 只删显式失败目录
+  - 不动当前稳定基线
+  - 不动仍会被后续 replay 复用的上游快照
+
+### 10.4 THEIA 3.11 上游数据核对
+
+本轮重新执行了 THEIA 3.11 对应窗口的原始日志核对：
+
+- 目标窗口：
+  - `THEIA_20180412_1244_1326_03`
+- 对照方式：
+  - 直接按 enriched GT 的窗口定义
+  - 分别对 `offset=0` 和 `offset=+240`
+  - 在原始日志里搜索报告可观察项与 GT 节点相关事件
+- 结果：
+  - 在已经测试的固定偏移范围内，这个窗口都没有观测到有效命中
+  - `offset=0` 和 `offset=+240` 都不是有效对齐方式
+- 当前结论：
+  - `THEIA_20180412_1244_1326_03` 仍应优先归因到 `源日志 / GT / 报告对齐未解`
+  - 不能把它继续当成“仅靠链条语义就能修好”的后半段问题
+
+### 10.5 TRACE 原始日志切换与零战术窗口核对
+
+数据准备动作：
+
+- 已删除云端展开后的 THEIA 原始日志目录
+- 已解压 TRACE 原始日志归档
+- 使用当前版本代码与 `+240` 偏移口径，对 TRACE 中“完全没有检测出战术”的窗口做原始日志 GT UUID 核对
+
+当前核对的零战术窗口：
+
+- `TRACE_20180410_0946_1109_01`
+- `TRACE_20180410_1228_1230_02`
+- `TRACE_20180412_1336_1336_03`
+
+核对结果：
+
+- 这 3 个窗口在 `+240` 后，`subject/process` 命中仍为 `0`
+- `any_role` 命中也为 `0`
+- 即：在当前 GT UUID 名单与当前日志解析口径下，这 3 个窗口在原始日志层面就没有打到对应 GT UUID
+
+结论：
+
+- 这 3 个 TRACE 零战术窗口，不是单纯 `module5/module6` 没识别出来
+- 更像是更前面的 `GT 节点名单 / 窗口时间 / 原始日志可观察性` 本身就没有对上
+- 因此当前不应直接把它们归因成链条语义或 tactic mapping 的失败
+
+### 10.6 CADETS 直跑：绕过 module2，仅用 GT 命中的 base task
+
+本轮新增了一条 CADETS 专用直跑线：
+
+- 配置语义：
+  - `module1 -> module3 -> module4 -> module5 -> module6 -> eval`
+  - 不走 `module2` 恶意图检测筛选
+  - 任务选择方式改为 `module1_ground_truth_positive_base_only`
+  - `fanout > 2`
+  - `exclude_segmented`
+  - evaluator 使用 enriched GT，并显式应用 `+240`
+- 产物目录：
+  - `artifacts_cadets_train_stats_latefusion_llama31_microstep2b_module1_gtbase_tactics_only_llm_fanout_gt2_e3gt_plus240_20260627`
+
+指标：
+
+- `confirmed_window_recall = 0.5`
+- `strict_tactic_recall_macro = 0.09166666666666667`
+- `strict_tactic_precision_macro = 1.0`
+- `off_window_high_risk_rate = 0.9375`
+
+结论：
+
+- 这条线能把后半段跑通，但整体噪声仍很高
+- 两个窗口仍然完全没有 primary-time matched path：
+  - `CADETS_20180406_1121_1208_01`
+  - `CADETS_20180411_1508_1515_02`
+
+### 10.7 CADETS 零战术窗口上游核对
+
+对上面两个 CADETS 零战术窗口，再做了一轮原始日志核对：
+
+- 对照窗口：
+  - `CADETS_20180406_1121_1208_01`
+  - `CADETS_20180411_1508_1515_02`
+- 对照方式：
+  - `offset=0`
+  - `offset=+240`
+  - 同时看 `subject/process` 命中和 `any_role` 命中
+
+结果非常一致：
+
+- 两个窗口在 `offset=0` 和 `offset=+240` 下：
+  - `subject/process hit = 0`
+  - `any_role hit = 7`
+- 这 7 个 UUID 全都只出现在 `object-side`，不出现在 `subject/process-side`
+- 高频动作主要是：
+  - `MMAP`
+  - `OPEN`
+  - `CLOSE`
+  - `READ`
+  - 少量 `EXECUTE`
+
+当前结论：
+
+- 这两个 CADETS 零战术窗口并不是“完全没有 GT 命中”
+- 但它们命中的更像是恶意对象 / 恶意对象侧 UUID，而不是活跃恶意进程 UUID
+- 因此如果当前主线主要靠进程图、证据图中的进程链条来承接攻击语义，就天然会对这两个窗口不友好
+- 这也再次说明：
+  - CADETS 某些窗口的主瓶颈并不只是 tactic 识别
+  - 还包括 `GT 名单角色语义`、`对象侧命中如何进入链条`、以及 `进程优先主线` 的表达上限
+
+### 10.8 这轮实验的主要用途与后续意义
+
+这轮 2026-06-27 的工作，主要不是为了直接抬高指标，而是为了把“零战术窗口”的问题分层拆清楚：
+
+- THEIA 3.11：
+  - 更像 `日志 / GT / 报告对齐` 问题
+- TRACE 三个零战术窗口：
+  - 当前口径下，原始日志层面就没有命中 GT UUID
+- CADETS 两个零战术窗口：
+  - 命中集中在 `object-side`，而不是 `subject/process-side`
+
+因此后续优化时应避免把这些窗口一股脑归因成“后半段规则不够好”。更合理的下一步方向是：
+
+1. 先把“窗口没有 GT 进程命中”与“窗口有对象命中但没有进程命中”分开处理。
+2. 对 CADETS 这类 `object-side only` 窗口，评估是否需要把对象证据更实质地接进链条，而不是继续只靠进程主线。
+3. 对 TRACE / THEIA 那些原始日志层面就没有 GT 命中的窗口，优先做 GT 对齐、报告对齐和日志可观察性复核，不应直接推进 claim 或 tactic mapping 修补。
