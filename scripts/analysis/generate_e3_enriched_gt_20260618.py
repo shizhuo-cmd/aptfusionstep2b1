@@ -115,7 +115,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
         "start_time": "2018-04-06T11:21:00",
         "end_time": "2018-04-06T12:08:00",
         "attack_summary": "CADETS 上的 Nginx 被成功利用，drakon/operator console 回连建立，攻击者提权运行 netrecon 并尝试向 sshd 注入 libdrakon，最终 CADETS 崩溃。",
-        "notes": "窗口只把成功攻击链记为 confirmed；失败的 sshd 注入单独保留在 behavior_chain 中，不上升为窗口级 attempted tactics。",
+        "notes": "窗口只把成功攻击链记为 confirmed；失败的 sshd 注入除保留在 behavior_chain 外，也上升为 attempted DEFENSE_EVASION。",
         "behaviors": [
             {
                 "behavior_id": "exploit_delivery",
@@ -198,6 +198,12 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
                 "why": "攻击者执行 nrinfo/nrtcp 与 ps，对网络和进程做侦察。",
                 "behavior_ids": ["network_scan", "process_discovery"],
             },
+            {
+                "tactic": "DEFENSE_EVASION",
+                "judgment": "attempted",
+                "why": "报告明确记录了向 sshd 注入 libdrakon 的尝试，但最终失败并导致主机崩溃。",
+                "behavior_ids": ["inject_attempt"],
+            },
         ],
         "technique_rationales": [
             {
@@ -229,6 +235,12 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
                 "judgment": "confirmed",
                 "why": "Event Log 中有直接的 ps 进程枚举。",
                 "behavior_ids": ["process_discovery"],
+            },
+            {
+                "technique_id": "T1055",
+                "judgment": "attempted",
+                "why": "libdrakon 被用于对 sshd 进程做 inject 尝试，但最终失败。",
+                "behavior_ids": ["inject_attempt"],
             },
         ],
     },
@@ -287,7 +299,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
         "start_time": "2018-04-10T13:41:00",
         "end_time": "2018-04-10T14:55:00",
         "attack_summary": "THEIA 通过恶意网站 exploit Firefox，drakon 两次获得 shell，并把 clean/profile/xdev 等载荷写盘、提权、回连，最后又留下可后续触发的盘上落地物。",
-        "notes": "09:58 的主机重启说明被保留在证据里，但时间窗按真正的攻击交互阶段取 13:41-14:55。",
+        "notes": "09:58 的主机重启说明被保留在证据里，但时间窗按真正的攻击交互阶段取 13:41-14:55；rm clean / rm profile 作为原文明确给出的清理动作，上升为 confirmed DEFENSE_EVASION。",
         "behaviors": [
             {
                 "behavior_id": "driveby_exploit",
@@ -324,6 +336,13 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
                 "why": "连接交互中出现 L2>nrtcp，说明使用 netrecon 做网络探测。",
                 "selectors": [_selector("L2>nrtcp 7.149.198.40 80", "netrecon (www.gatech.edu)")],
             },
+            {
+                "behavior_id": "cleanup_delete",
+                "action": "file_delete",
+                "judgment": "confirmed",
+                "why": "交互里明确写出 rm clean 与 rm profile，属于成功完成的落地物清理。",
+                "selectors": [_selector("rm clean", "rm profile")],
+            },
         ],
         "tactic_rationales": [
             {"tactic": "INITIAL_ACCESS", "judgment": "confirmed", "why": "Firefox 恶意网站 exploit 成功进入 THEIA。", "behavior_ids": ["driveby_exploit"]},
@@ -331,12 +350,14 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"tactic": "PRIVILEGE_ESCALATION", "judgment": "confirmed", "why": "正文明确写明新的 drakon 进程以 root 身份运行。", "behavior_ids": ["payload_elevate"]},
             {"tactic": "COMMAND_AND_CONTROL", "judgment": "confirmed", "why": "shell、connect back 与 profile 对外连接共同表明已形成 C2。", "behavior_ids": ["c2_callback"]},
             {"tactic": "DISCOVERY", "judgment": "confirmed", "why": "nrtcp/netrecon 对网络接口与可达性做侦察。", "behavior_ids": ["network_scan"]},
+            {"tactic": "DEFENSE_EVASION", "judgment": "confirmed", "why": "rm clean 与 rm profile 是原文直接给出的删除清理动作。", "behavior_ids": ["cleanup_delete"]},
         ],
         "technique_rationales": [
             {"technique_id": "T1189", "judgment": "confirmed", "why": "恶意网站导致 Firefox exploit。", "behavior_ids": ["driveby_exploit"]},
             {"technique_id": "T1071.001", "judgment": "confirmed", "why": "operator console 与 drakon 的通信走 web/HTTP 风格地址。", "behavior_ids": ["c2_callback"]},
             {"technique_id": "T1105", "judgment": "confirmed", "why": "putfile 明确把 drakon/libdrakon 组件写入目标。", "behavior_ids": ["payload_write"]},
             {"technique_id": "T1046", "judgment": "confirmed", "why": "nrtcp/netrecon 对目标网络进行侦察。", "behavior_ids": ["network_scan"]},
+            {"technique_id": "T1070.004", "judgment": "confirmed", "why": "rm clean 与 rm profile 是显式文件删除清理。", "behavior_ids": ["cleanup_delete"]},
         ],
     },
     "3.4": {
@@ -375,7 +396,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
         "start_time": "2018-04-11T15:08:00",
         "end_time": "2018-04-11T15:15:00",
         "attack_summary": "CADETS 再次通过 Nginx malformed HTTP request 成功拿到 drakon in-memory shell，并把 libdrakon 落盘后尝试注入 sshd，最终再次导致主机崩溃。",
-        "notes": "这一节成功确认了 exploit、shell/C2 和载荷落盘；失败的 inject 单独保存在行为链，不上升为窗口级 attempted tactics。",
+        "notes": "这一节成功确认了 exploit、shell/C2 和载荷落盘；失败的 inject 既保留在行为链，也上升为 attempted DEFENSE_EVASION。",
         "behaviors": [
             {"behavior_id": "exploit_delivery", "action": "exploit_delivery", "judgment": "confirmed", "why": "正文明确写到 Nginx exploit 第一次即成功。", "selectors": [_selector("once again exploiting Nginx", "This time, the exploit worked on the first attempt", "15:08 throw http payload")]},
             {"behavior_id": "c2_callback", "action": "c2_callback", "judgment": "confirmed", "why": "正文写到 drakon implant running in memory of Nginx with a shell connected via HTTP to the operator console。", "selectors": [_selector("shell connected via HTTP to the operator console", "nginx: connection to 155.162.39.48:80")]},
@@ -386,11 +407,13 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"tactic": "INITIAL_ACCESS", "judgment": "confirmed", "why": "Nginx exploit 成功进入 CADETS。", "behavior_ids": ["exploit_delivery"]},
             {"tactic": "EXECUTION", "judgment": "confirmed", "why": "drakon 在 nginx 内存中运行，libdrakon 也被写盘准备执行/注入。", "behavior_ids": ["exploit_delivery", "module_transfer"]},
             {"tactic": "COMMAND_AND_CONTROL", "judgment": "confirmed", "why": "operator console shell 已被成功建立。", "behavior_ids": ["c2_callback"]},
+            {"tactic": "DEFENSE_EVASION", "judgment": "attempted", "why": "grain 被用于向 sshd 注入，但最终失败并造成 kernel panic。", "behavior_ids": ["inject_attempt"]},
         ],
         "technique_rationales": [
             {"technique_id": "T1190", "judgment": "confirmed", "why": "Nginx 公网服务被利用。", "behavior_ids": ["exploit_delivery"]},
             {"technique_id": "T1071.001", "judgment": "confirmed", "why": "shell 通过 HTTP/operator console 连接。", "behavior_ids": ["c2_callback"]},
             {"technique_id": "T1105", "judgment": "confirmed", "why": "libdrakon 作为注入载荷被传入目标。", "behavior_ids": ["module_transfer"]},
+            {"technique_id": "T1055", "judgment": "attempted", "why": "grain 被明确用于对 sshd 进程做 inject 尝试，但最终失败。", "behavior_ids": ["inject_attempt"]},
         ],
     },
     "3.10": {
@@ -419,7 +442,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
         "start_time": "2018-04-12T12:44:00",
         "end_time": "2018-04-12T13:26:00",
         "attack_summary": "THEIA 上的恶意浏览器扩展攻击通过写盘方式转成成功链：drakon 与 micro apt 分别落盘、注入尝试失败、micro 提权并回连，随后进行大规模端口扫描并删除 mail 落地物。",
-        "notes": "窗口同时记录了 failed injection 与 successful micro path；confirmed tactics 只统计最终成功形成的攻击阶段。",
+        "notes": "窗口同时记录了 failed injection 与 successful micro path；confirmed tactics 统计成功链，failed injection 额外上升为 attempted DEFENSE_EVASION。",
         "behaviors": [
             {"behavior_id": "browser_extension_exploit", "action": "exploit_delivery", "judgment": "confirmed", "why": "浏览器扩展路径虽然没能把 drakon 留在内存里，但成功把后续载荷链推到了磁盘执行阶段。", "selectors": [_selector("www.gatech.edu loaderDrakon browser ext", "www.gatech.edu drakon browser ext", "writing the drakon implant executable to disk on the target upon exploiting the browser extension")]},
             {"behavior_id": "payload_write", "action": "payload_write", "judgment": "confirmed", "why": "xdev/wdev/memtrace.so/mail 等文件均被明确写入。", "selectors": [_selector("putfile /tmp/memtrace.so", "putfile ./deploy/archive/microapt", "putfile ./deploy/archive/libdrakon", "L2>putfile ./deploy/archive/microapt.linux.x64_149.52.198.23 mail")]},
@@ -438,6 +461,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"tactic": "COMMAND_AND_CONTROL", "judgment": "confirmed", "why": "gtcache/drakon 与 micro listener 的外连共同说明已形成控制通道。", "behavior_ids": ["c2_callback"]},
             {"tactic": "DISCOVERY", "judgment": "confirmed", "why": "whoami、ps 和多批次 APT>scan 同时覆盖身份、进程和网络侦察。", "behavior_ids": ["identity_discovery", "process_discovery", "network_scan"]},
             {"tactic": "DEFENSE_EVASION", "judgment": "confirmed", "why": "mail/xdev/wdev 等落地物被删除，属于明确的痕迹清理/落地物清理。", "behavior_ids": ["cleanup_delete"]},
+            {"tactic": "DEFENSE_EVASION", "judgment": "attempted", "why": "多次向 sshd 注入 xdev/wdev/memtrace.so 的尝试都失败了。", "behavior_ids": ["inject_attempt"]},
         ],
         "technique_rationales": [
             {"technique_id": "T1203", "judgment": "confirmed", "why": "恶意浏览器扩展 exploit 是窗口的进入方式。", "behavior_ids": ["browser_extension_exploit"]},
@@ -447,6 +471,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"technique_id": "T1033", "judgment": "confirmed", "why": "whoami 明确对应身份发现。", "behavior_ids": ["identity_discovery"]},
             {"technique_id": "T1057", "judgment": "confirmed", "why": "ps 与 sshd PID 枚举明确对应进程发现。", "behavior_ids": ["process_discovery"]},
             {"technique_id": "T1070.004", "judgment": "confirmed", "why": "rm mail/xdev/wdev 是明确的文件删除清理。", "behavior_ids": ["cleanup_delete"]},
+            {"technique_id": "T1055", "judgment": "attempted", "why": "xdev/wdev/memtrace.so 被多次用于向 sshd 注入，但都失败。", "behavior_ids": ["inject_attempt"]},
         ],
     },
     "3.12": {
@@ -473,7 +498,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
         "start_time": "2018-04-12T14:00:00",
         "end_time": "2018-04-12T14:38:00",
         "attack_summary": "CADETS 上再次成功利用 Nginx，drakon/XIM 与 micro 两条链并行推进：多次传入 drakon/libdrakon/microapt，最终 XIM 提权成功、micro 落盘执行并回连，再对多个内网地址做端口扫描，同时清理若干临时文件。",
-        "notes": "这一节是 CADETS 里最完整的成功链之一，因此保留了提权、C2、扫描和清理四类强信号。",
+        "notes": "这一节是 CADETS 里最完整的成功链之一；除成功的 drakon 提权外，也保留 micro 等多次失败的提权尝试为 attempted PRIVILEGE_ESCALATION。",
         "behaviors": [
             {"behavior_id": "exploit_delivery", "action": "exploit_delivery", "judgment": "confirmed", "why": "Nginx malformed HTTP request exploit 再次成功。", "selectors": [_selector("once again exploiting Nginx", "1400 http_post shell F1", "exploit: connection on port 80 from 25.159.96.207")]},
             {"behavior_id": "payload_write", "action": "payload_write", "judgment": "confirmed", "why": "tmux-1002/minions/font/XIM/netlog/sendmail/main/test 等载荷均被 putfile 到磁盘。", "selectors": [_selector("putfile ./deploy/archive/microapt", "putfile ./deploy/archive/libdrakon", "putfile ./deploy/archive/drakon", "tmux-1002", "sendmail", "test")]},
@@ -484,6 +509,9 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"behavior_id": "cleanup_delete", "action": "file_delete", "judgment": "confirmed",
                 "why": "grain/vUGefai/tmux-1002/minion/XIM/netlog/sendmail/main/test 等文件有多次 rm 清理。",
                 "selectors": [_selector("F1>rm grain", "F1>rm vUGefai", "F1>rm tmux-1002", "F2>rm minion", "F2>rm XIM", "F2>rm netlog", "F2>rm sendmail", "F2>rm main", "F2>rm test")]},
+            {"behavior_id": "payload_elevate_attempt", "action": "payload_elevate", "judgment": "attempted",
+                "why": "micro 相关载荷存在多次 failed elevate，说明窗口内确有失败的提权尝试。",
+                "selectors": [_selector("tried to elevate it. This was unsuccessful multiple times", "elevate /tmp/tmux-1002 (failed)", "elevate /tmp/minions (failed)", "elevate /var/log/netlog (failed)", "elevate /var/log/sendmail (failed)", "elevate /tmp/test (failed)")]},
         ],
         "tactic_rationales": [
             {"tactic": "INITIAL_ACCESS", "judgment": "confirmed", "why": "Nginx exploit 成功开启后续链。", "behavior_ids": ["exploit_delivery"]},
@@ -492,6 +520,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"tactic": "COMMAND_AND_CONTROL", "judgment": "confirmed", "why": "XIM 与 micro sendmail 都形成了对外 C2 连接。", "behavior_ids": ["c2_callback"]},
             {"tactic": "DISCOVERY", "judgment": "confirmed", "why": "Micro APT 针对多个目标和端口做扫描。", "behavior_ids": ["network_scan"]},
             {"tactic": "DEFENSE_EVASION", "judgment": "confirmed", "why": "大量临时/载荷文件被删除，属于显式清理行为。", "behavior_ids": ["cleanup_delete"]},
+            {"tactic": "PRIVILEGE_ESCALATION", "judgment": "attempted", "why": "micro 相关载荷有多次 failed elevate，属于窗口内明确发生但未成功的提权尝试。", "behavior_ids": ["payload_elevate_attempt"]},
         ],
         "technique_rationales": [
             {"technique_id": "T1190", "judgment": "confirmed", "why": "Nginx exploit 是整个窗口的进入方式。", "behavior_ids": ["exploit_delivery"]},
@@ -507,7 +536,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
         "start_time": "2018-04-13T09:04:00",
         "end_time": "2018-04-13T09:15:00",
         "attack_summary": "CADETS 上重新连回旧 shell 后，再次通过 Nginx exploit 生成新的 drakon in-memory 会话，把 drakon 与 libdrakon 落盘、提权为 root 进程、再次回连，并对 sshd 做多次注入尝试。",
-        "notes": "窗口中 inject 仍失败，但 whoami/ps、落盘、提权和第二条 C2 都是明确成功行为。",
+        "notes": "窗口中 inject 仍失败，但 whoami/ps、落盘、提权和第二条 C2 都是明确成功行为；失败的 inject 额外上升为 attempted DEFENSE_EVASION。",
         "behaviors": [
             {"behavior_id": "reconnect_old_shell", "action": "c2_callback", "judgment": "confirmed", "why": "Event Log 开头明确写到 reconnect to open connection。", "selectors": [_selector("09:04 reconnect to open connection")]},
             {"behavior_id": "identity_discovery", "action": "identity_discovery", "judgment": "confirmed", "why": "Event Log 中直接执行 whoami。", "selectors": [_selector("09:04 whoami", "09:12 whoami")]},
@@ -524,6 +553,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"tactic": "PRIVILEGE_ESCALATION", "judgment": "confirmed", "why": "新的 drakon 进程以 root 权限运行。", "behavior_ids": ["payload_elevate"]},
             {"tactic": "COMMAND_AND_CONTROL", "judgment": "confirmed", "why": "旧 shell reconnect 与新的 root drakon/operator console 连接都已形成。", "behavior_ids": ["reconnect_old_shell", "c2_callback"]},
             {"tactic": "DISCOVERY", "judgment": "confirmed", "why": "whoami 和 ps/sshd PID 枚举共同支撑身份与进程侦察。", "behavior_ids": ["identity_discovery", "process_discovery"]},
+            {"tactic": "DEFENSE_EVASION", "judgment": "attempted", "why": "root drakon 针对 sshd 的多次 inject 都失败了。", "behavior_ids": ["inject_attempt"]},
         ],
         "technique_rationales": [
             {"technique_id": "T1190", "judgment": "confirmed", "why": "Nginx 再次被 exploit。", "behavior_ids": ["exploit_delivery"]},
@@ -531,6 +561,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"technique_id": "T1105", "judgment": "confirmed", "why": "drakon 与 libdrakon 被传入并落盘复制。", "behavior_ids": ["payload_write"]},
             {"technique_id": "T1033", "judgment": "confirmed", "why": "whoami 明确对应身份发现。", "behavior_ids": ["identity_discovery"]},
             {"technique_id": "T1057", "judgment": "confirmed", "why": "ps 与 sshd PID 对应进程发现。", "behavior_ids": ["process_discovery"]},
+            {"technique_id": "T1055", "judgment": "attempted", "why": "memhelp.so / eraseme / done.so 被用于对 sshd 的 inject 尝试，但都失败。", "behavior_ids": ["inject_attempt"]},
         ],
     },
     "3.15": {
@@ -538,13 +569,14 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
         "time_precision": "minute_window",
         "start_time": "2018-04-13T12:43:00",
         "end_time": "2018-04-13T12:53:00",
-        "attack_summary": "TRACE 利用恶意密码管理器扩展把 drakon 写盘，再转而落盘/执行 micro apt；micro 成功回连并做端口扫描，同时删除 /tmp/ztmp 临时文件，提权尝试未能稳定成功。",
-        "notes": "窗口保留了 failed privilege escalation 背景，但 confirmed tactics 只统计已经成功形成的执行、C2、扫描与清理行为。",
+        "attack_summary": "TRACE 利用恶意密码管理器扩展把 drakon 写盘，再转而落盘/执行 micro apt；micro 成功回连并做端口扫描，同时删除 /tmp/ztmp 临时文件，提权与向 sshd 注入的尝试都未能稳定成功。",
+        "notes": "窗口保留了 failed privilege escalation 与 failed injection 背景；confirmed tactics 只统计已经成功形成的执行、C2、扫描与清理，失败的提权/注入则记入 attempted tactics。",
         "behaviors": [
             {"behavior_id": "browser_extension_exploit", "action": "exploit_delivery", "judgment": "confirmed", "why": "报告正文明确写到 continued attack against TRACE via malicious pass manager browser extension。", "selectors": [_selector("malicious pass manager browser extension", "1243 browse to allstate.com", "1243 shell L1")]},
             {"behavior_id": "process_discovery", "action": "process_discovery", "judgment": "confirmed", "why": "Event Log 中有 ps 与 sshd PID。", "selectors": [_selector("1243 ps", "root (sshd)")]},
             {"behavior_id": "payload_write", "action": "payload_write", "judgment": "confirmed", "why": "正文明确说把 drakon executable 写到磁盘，又写入 micro apt。", "selectors": [_selector("writing the drakon implant executable to disk", "1246 ztmp", "used the browser extension to write the drakon implant executable to disk", "writing micro apt to disk")]},
             {"behavior_id": "payload_elevate", "action": "payload_elevate", "judgment": "attempted", "why": "Event Log 中出现 elevate ztmp，但正文明确说明 micro 无法完成提权。", "selectors": [_selector("1246 elevate ztmp", "We were unable to elevate micro")]},
+            {"behavior_id": "inject_attempt", "action": "inject_attempt", "judgment": "attempted", "why": "评论中明确写到尝试把 staged file 注入 sshd 进程内存，但最终失败。", "selectors": [_selector("process injection failing", "load the file staged on disk into sshd process memory but could not do so")]},
             {"behavior_id": "payload_execute", "action": "payload_execute", "judgment": "confirmed", "why": "Event Log 中有 execfile，正文也写到 executed it from disk。", "selectors": [_selector("1247 execfile", "executed it", "We settled for writing micro apt to disk and executing it")]},
             {"behavior_id": "c2_callback", "action": "c2_callback", "judgment": "confirmed", "why": "micro callback 明确形成了对外控制连接。", "selectors": [_selector("1248 micro callback", "Micro apt connected out to the micro C2 listener")]},
             {"behavior_id": "network_scan", "action": "scan", "judgment": "confirmed", "why": "Event Log 中有 micro portscan 与 netrecon 8064。", "selectors": [_selector("1248 micro portscan", "1253 netrecon 8064", "used micro apt to perform a portscan")]},
@@ -556,6 +588,8 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"tactic": "COMMAND_AND_CONTROL", "judgment": "confirmed", "why": "micro callback 是明确的控制连接。", "behavior_ids": ["c2_callback"]},
             {"tactic": "DISCOVERY", "judgment": "confirmed", "why": "ps/sshd PID 与 micro portscan/netrecon 共同支撑侦察行为。", "behavior_ids": ["process_discovery", "network_scan"]},
             {"tactic": "DEFENSE_EVASION", "judgment": "confirmed", "why": "rm /tmp/ztmp 是明确的落地物清理。", "behavior_ids": ["cleanup_delete"]},
+            {"tactic": "PRIVILEGE_ESCALATION", "judgment": "attempted", "why": "窗口内出现 elevate ztmp，且正文明确说明 micro 最终无法提权成功。", "behavior_ids": ["payload_elevate"]},
+            {"tactic": "DEFENSE_EVASION", "judgment": "attempted", "why": "评论中明确写到尝试把 staged file 注入 sshd 进程内存，但最终失败。", "behavior_ids": ["inject_attempt"]},
         ],
         "technique_rationales": [
             {"technique_id": "T1203", "judgment": "confirmed", "why": "通过恶意浏览器扩展重新 exploit TRACE。", "behavior_ids": ["browser_extension_exploit"]},
@@ -563,6 +597,7 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"technique_id": "T1046", "judgment": "confirmed", "why": "micro portscan/netrecon 对网络服务做侦察。", "behavior_ids": ["network_scan"]},
             {"technique_id": "T1057", "judgment": "confirmed", "why": "ps/sshd PID 明确对应进程发现。", "behavior_ids": ["process_discovery"]},
             {"technique_id": "T1070.004", "judgment": "confirmed", "why": "rm /tmp/ztmp 是显式文件删除。", "behavior_ids": ["cleanup_delete"]},
+            {"technique_id": "T1055", "judgment": "attempted", "why": "评论中明确写到尝试把 staged file 注入 sshd 进程内存，但最终失败。", "behavior_ids": ["inject_attempt"]},
         ],
     },
     "4.1": {
@@ -675,11 +710,12 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
         "time_precision": "minute_window",
         "start_time": "2018-04-13T13:50:00",
         "end_time": "2018-04-13T14:28:00",
-        "attack_summary": "TRACE 上的第一封恶意 tcexec 附件邮件失败，第二封把 micro apt 伪装成 tcexec 后成功：用户打开邮件后 micro 自动执行并回连，随后进行端口扫描，shell 命令尝试失败。",
-        "notes": "窗口同时保留 first attachment failed 与 second micro succeeded 两段，但 confirmed tactics 只按成功的 micro 链判定。",
+        "attack_summary": "TRACE 上的第一封恶意 tcexec 附件邮件失败，第二封把 micro apt 伪装成 tcexec 后成功：用户打开邮件后 micro 自动执行并回连，随后进行端口扫描，shell 命令尝试失败；同时 pine backdoor 写出了 tcexfil 本地数据文件。",
+        "notes": "窗口同时保留 first attachment failed 与 second micro succeeded 两段；由于报告明确说明 tcexfil 用于写出 stolen e-mail data，因此 COLLECTION 也计入 confirmed。",
         "behaviors": [
             {"behavior_id": "phishing_attachment", "action": "attachment_open", "judgment": "confirmed", "why": "两次邮件附件投递都在 Event Log 中有直接记录，第二次 micro-as-tcexec 成功形成自动执行链。", "selectors": [_selector("13:50 from bob to everyone tcexec", "14:15 sent micro as tcexec", "14:20 open email with attachment")]},
             {"behavior_id": "payload_write", "action": "payload_write", "judgment": "confirmed", "why": "tcexec、tcexfil、Micro APT 文件都落到了磁盘。", "selectors": [_selector("tcexec file downloaded to disk", "tcexfil file written to tmp directory", "Micro APT File downloaded to disk")]},
+            {"behavior_id": "email_data_collect", "action": "file_collect", "judgment": "confirmed", "why": "评论明确说明漏洞版 pine 会把 stolen e-mail data 写到 tcexfil，而交互中也确实出现了 tcexfil 落地。", "selectors": [_selector("write stolen e-mail data to a file called tcexfil", "tcexfil file written to tmp directory")]},
             {"behavior_id": "payload_execute", "action": "payload_execute", "judgment": "confirmed", "why": "第二次邮件打开后 micro apt 自动执行成新进程。", "selectors": [_selector("When the user opened the e-mail, micro apt automatically executed as a new process", "14:20 got connection micro apt")]},
             {"behavior_id": "c2_callback", "action": "c2_callback", "judgment": "confirmed", "why": "Micro APT C2 与 eth0:951 TRACE micro 地址共同支撑控制连接。", "selectors": [_selector("Micro APT C2", "TRACE micro", "got connection micro apt", "connection out to the micro apt listener")]},
             {"behavior_id": "network_scan", "action": "scan", "judgment": "confirmed", "why": "Event Log 中有 micro apt portscan。", "selectors": [_selector("14:22 portscan from micro apt", "ran a portscan of the target network hosts")]},
@@ -690,12 +726,14 @@ SECTION_SPECS: dict[str, dict[str, Any]] = {
             {"tactic": "EXECUTION", "judgment": "confirmed", "why": "micro apt 作为附件被自动执行为新进程。", "behavior_ids": ["payload_write", "payload_execute"]},
             {"tactic": "COMMAND_AND_CONTROL", "judgment": "confirmed", "why": "Micro APT C2 连接被直接记录。", "behavior_ids": ["c2_callback"]},
             {"tactic": "DISCOVERY", "judgment": "confirmed", "why": "micro apt 对目标网络主机发起端口扫描。", "behavior_ids": ["network_scan"]},
+            {"tactic": "COLLECTION", "judgment": "confirmed", "why": "报告明确说明 pine backdoor 会把 stolen e-mail data 写到 tcexfil，而交互中记录了 tcexfil 文件已写出。", "behavior_ids": ["email_data_collect"]},
         ],
         "technique_rationales": [
             {"technique_id": "T1566.001", "judgment": "confirmed", "why": "报告明确写到通过恶意可执行附件发送 tcexec/micro。", "behavior_ids": ["phishing_attachment"]},
             {"technique_id": "T1204.002", "judgment": "confirmed", "why": "用户打开邮件后附件被执行。", "behavior_ids": ["phishing_attachment", "payload_execute"]},
             {"technique_id": "T1071.001", "judgment": "confirmed", "why": "Micro APT listener/C2 通过 web 风格地址建立。", "behavior_ids": ["c2_callback"]},
             {"technique_id": "T1046", "judgment": "confirmed", "why": "portscan 明确对应网络服务侦察。", "behavior_ids": ["network_scan"]},
+            {"technique_id": "T1005", "judgment": "confirmed", "why": "tcexfil 的语义被正文明确说明为 stolen e-mail data 的本地落地文件。", "behavior_ids": ["email_data_collect"]},
         ],
     },
     "4.10": {

@@ -322,6 +322,19 @@ def build_path_dossier(
     retained_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
     path_process_set = set(path.process_chain)
+    path_aliases = {
+        normalize_semantic_text(value)
+        for value in path.process_chain
+        if normalize_semantic_text(value)
+    }
+    resolved_process_guids = {
+        process_guid
+        for process_guid, state in process_states.items()
+        if normalize_semantic_text(process_guid) in path_aliases
+        or normalize_semantic_text(state.process_name) in path_aliases
+    }
+    if not resolved_process_guids:
+        resolved_process_guids = {value for value in path.process_chain if value in process_states}
     bridge_event_ids = {edge.write_event_id for edge in path.bridge_edges}.union(
         {edge.read_or_exec_event_id for edge in path.bridge_edges}
     )
@@ -338,7 +351,8 @@ def build_path_dossier(
     events = [
         event
         for event in retained_events
-        if str(event.get("process_guid", "")).strip() in path_process_set
+        if str(event.get("process_guid", "")).strip() in resolved_process_guids
+        or normalize_semantic_text(event.get("process_name", "")) in path_aliases
         or str(event.get("event_id", "")).strip() in bridge_event_ids
         or str(event.get("event_id", "")).strip() in path_context_event_ids
     ]

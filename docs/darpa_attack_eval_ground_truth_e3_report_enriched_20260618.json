@@ -1,6 +1,6 @@
 {
   "schema_version": "darpa_attack_eval_gt.v1",
-  "generated_at": "2026-06-17T18:32:16Z",
+  "generated_at": "2026-06-28T17:39:26Z",
   "source_documents": {
     "primary_attack_report_name": "TC_Ground_Truth_Report_E3_Update.md",
     "primary_attack_report_path": "D:\\dataji\\TC_Ground_Truth_Report_E3_Update_md\\TC_Ground_Truth_Report_E3_Update.md",
@@ -23,7 +23,9 @@
         "T1105",
         "T1190"
       ],
-      "attempted_technique_union": [],
+      "attempted_technique_union": [
+        "T1055"
+      ],
       "confirmed_tactic_union": [
         "COMMAND_AND_CONTROL",
         "DEFENSE_EVASION",
@@ -32,7 +34,10 @@
         "INITIAL_ACCESS",
         "PRIVILEGE_ESCALATION"
       ],
-      "attempted_tactic_union": []
+      "attempted_tactic_union": [
+        "DEFENSE_EVASION",
+        "PRIVILEGE_ESCALATION"
+      ]
     },
     "FIVEDIRECTIONS": {
       "window_count": 4,
@@ -85,6 +90,7 @@
         "T1566.002"
       ],
       "attempted_technique_union": [
+        "T1055",
         "T1204.002",
         "T1566.001"
       ],
@@ -98,6 +104,7 @@
         "PRIVILEGE_ESCALATION"
       ],
       "attempted_tactic_union": [
+        "DEFENSE_EVASION",
         "EXECUTION",
         "INITIAL_ACCESS"
       ]
@@ -108,6 +115,7 @@
       "attempted_window_count": 1,
       "insufficient_window_count": 0,
       "confirmed_technique_union": [
+        "T1005",
         "T1046",
         "T1057",
         "T1070.004",
@@ -121,9 +129,11 @@
         "T1566.002"
       ],
       "attempted_technique_union": [
+        "T1055",
         "T1203"
       ],
       "confirmed_tactic_union": [
+        "COLLECTION",
         "COMMAND_AND_CONTROL",
         "CREDENTIAL_ACCESS",
         "DEFENSE_EVASION",
@@ -133,8 +143,10 @@
         "PRIVILEGE_ESCALATION"
       ],
       "attempted_tactic_union": [
+        "DEFENSE_EVASION",
         "EXECUTION",
-        "INITIAL_ACCESS"
+        "INITIAL_ACCESS",
+        "PRIVILEGE_ESCALATION"
       ]
     }
   },
@@ -150,6 +162,10 @@
     ],
     "T1046": [
       "DISCOVERY"
+    ],
+    "T1055": [
+      "DEFENSE_EVASION",
+      "PRIVILEGE_ESCALATION"
     ],
     "T1057": [
       "DISCOVERY"
@@ -205,7 +221,9 @@
         "T1046",
         "T1057"
       ],
-      "attempted_techniques": [],
+      "attempted_techniques": [
+        "T1055"
+      ],
       "confirmed_tactics": [
         "INITIAL_ACCESS",
         "EXECUTION",
@@ -213,7 +231,9 @@
         "COMMAND_AND_CONTROL",
         "DISCOVERY"
       ],
-      "attempted_tactics": [],
+      "attempted_tactics": [
+        "DEFENSE_EVASION"
+      ],
       "coarse_chain_tags": [
         "exploit_delivery",
         "c2_callback",
@@ -223,7 +243,7 @@
         "inject_attempt",
         "process_discovery"
       ],
-      "notes": "窗口只把成功攻击链记为 confirmed；失败的 sshd 注入单独保留在 behavior_chain 中，不上升为窗口级 attempted tactics。",
+      "notes": "窗口只把成功攻击链记为 confirmed；失败的 sshd 注入除保留在 behavior_chain 外，也上升为 attempted DEFENSE_EVASION。",
       "broad_techniques": [],
       "attack_summary": "CADETS 上的 Nginx 被成功利用，drakon/operator console 回连建立，攻击者提权运行 netrecon 并尝试向 sshd 注入 libdrakon，最终 CADETS 崩溃。",
       "source_report_pages": [
@@ -395,6 +415,22 @@
             "network_scan",
             "process_discovery"
           ]
+        },
+        {
+          "tactic": "DEFENSE_EVASION",
+          "judgment": "attempted",
+          "why": "报告明确记录了向 sshd 注入 libdrakon 的尝试，但最终失败并导致主机崩溃。",
+          "evidence_ids": [
+            "3_1_e001",
+            "3_1_e003",
+            "3_1_e012",
+            "3_1_e013",
+            "3_1_e014",
+            "3_1_e024"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
+          ]
         }
       ],
       "technique_rationales": [
@@ -464,6 +500,22 @@
           ],
           "behavior_ids": [
             "process_discovery"
+          ]
+        },
+        {
+          "technique_id": "T1055",
+          "judgment": "attempted",
+          "why": "libdrakon 被用于对 sshd 进程做 inject 尝试，但最终失败。",
+          "evidence_ids": [
+            "3_1_e001",
+            "3_1_e003",
+            "3_1_e012",
+            "3_1_e013",
+            "3_1_e014",
+            "3_1_e024"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
           ]
         }
       ],
@@ -2245,20 +2297,24 @@
         "T1071.001",
         "T1105"
       ],
-      "attempted_techniques": [],
+      "attempted_techniques": [
+        "T1055"
+      ],
       "confirmed_tactics": [
         "INITIAL_ACCESS",
         "EXECUTION",
         "COMMAND_AND_CONTROL"
       ],
-      "attempted_tactics": [],
+      "attempted_tactics": [
+        "DEFENSE_EVASION"
+      ],
       "coarse_chain_tags": [
         "exploit_delivery",
         "c2_callback",
         "payload_write",
         "inject_attempt"
       ],
-      "notes": "这一节成功确认了 exploit、shell/C2 和载荷落盘；失败的 inject 单独保存在行为链，不上升为窗口级 attempted tactics。",
+      "notes": "这一节成功确认了 exploit、shell/C2 和载荷落盘；失败的 inject 既保留在行为链，也上升为 attempted DEFENSE_EVASION。",
       "broad_techniques": [],
       "attack_summary": "CADETS 再次通过 Nginx malformed HTTP request 成功拿到 drakon in-memory shell，并把 libdrakon 落盘后尝试注入 sshd，最终再次导致主机崩溃。",
       "source_report_pages": [
@@ -2398,6 +2454,20 @@
           "behavior_ids": [
             "c2_callback"
           ]
+        },
+        {
+          "tactic": "DEFENSE_EVASION",
+          "judgment": "attempted",
+          "why": "grain 被用于向 sshd 注入，但最终失败并造成 kernel panic。",
+          "evidence_ids": [
+            "3_8_e002",
+            "3_8_e007",
+            "3_8_e008",
+            "3_8_e016"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
+          ]
         }
       ],
       "technique_rationales": [
@@ -2439,6 +2509,20 @@
           ],
           "behavior_ids": [
             "module_transfer"
+          ]
+        },
+        {
+          "technique_id": "T1055",
+          "judgment": "attempted",
+          "why": "grain 被明确用于对 sshd 进程做 inject 尝试，但最终失败。",
+          "evidence_ids": [
+            "3_8_e002",
+            "3_8_e007",
+            "3_8_e008",
+            "3_8_e016"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
           ]
         }
       ],
@@ -3296,7 +3380,9 @@
         "DISCOVERY",
         "DEFENSE_EVASION"
       ],
-      "attempted_tactics": [],
+      "attempted_tactics": [
+        "PRIVILEGE_ESCALATION"
+      ],
       "coarse_chain_tags": [
         "exploit_delivery",
         "payload_write",
@@ -3306,7 +3392,7 @@
         "scan",
         "file_delete"
       ],
-      "notes": "这一节是 CADETS 里最完整的成功链之一，因此保留了提权、C2、扫描和清理四类强信号。",
+      "notes": "这一节是 CADETS 里最完整的成功链之一；除成功的 drakon 提权外，也保留 micro 等多次失败的提权尝试为 attempted PRIVILEGE_ESCALATION。",
       "broad_techniques": [],
       "attack_summary": "CADETS 上再次成功利用 Nginx，drakon/XIM 与 micro 两条链并行推进：多次传入 drakon/libdrakon/microapt，最终 XIM 提权成功、micro 落盘执行并回连，再对多个内网地址做端口扫描，同时清理若干临时文件。",
       "source_report_pages": [
@@ -3515,6 +3601,28 @@
           ],
           "behavior_ids": [
             "cleanup_delete"
+          ]
+        },
+        {
+          "tactic": "PRIVILEGE_ESCALATION",
+          "judgment": "attempted",
+          "why": "micro 相关载荷有多次 failed elevate，属于窗口内明确发生但未成功的提权尝试。",
+          "evidence_ids": [
+            "3_13_e001",
+            "3_13_e036",
+            "3_13_e037",
+            "3_13_e038",
+            "3_13_e039",
+            "3_13_e040",
+            "3_13_e044",
+            "3_13_e045",
+            "3_13_e046",
+            "3_13_e049",
+            "3_13_e050",
+            "3_13_e051"
+          ],
+          "behavior_ids": [
+            "payload_elevate_attempt"
           ]
         }
       ],
@@ -5953,6 +6061,26 @@
             "3_13_e033",
             "3_13_e035"
           ]
+        },
+        {
+          "behavior_id": "payload_elevate_attempt",
+          "action": "payload_elevate",
+          "judgment": "attempted",
+          "why": "micro 相关载荷存在多次 failed elevate，说明窗口内确有失败的提权尝试。",
+          "evidence_ids": [
+            "3_13_e001",
+            "3_13_e036",
+            "3_13_e037",
+            "3_13_e038",
+            "3_13_e039",
+            "3_13_e040",
+            "3_13_e044",
+            "3_13_e045",
+            "3_13_e046",
+            "3_13_e049",
+            "3_13_e050",
+            "3_13_e051"
+          ]
         }
       ]
     },
@@ -5972,7 +6100,9 @@
         "T1033",
         "T1057"
       ],
-      "attempted_techniques": [],
+      "attempted_techniques": [
+        "T1055"
+      ],
       "confirmed_tactics": [
         "INITIAL_ACCESS",
         "EXECUTION",
@@ -5980,7 +6110,9 @@
         "COMMAND_AND_CONTROL",
         "DISCOVERY"
       ],
-      "attempted_tactics": [],
+      "attempted_tactics": [
+        "DEFENSE_EVASION"
+      ],
       "coarse_chain_tags": [
         "c2_callback",
         "identity_discovery",
@@ -5990,7 +6122,7 @@
         "payload_elevate",
         "inject_attempt"
       ],
-      "notes": "窗口中 inject 仍失败，但 whoami/ps、落盘、提权和第二条 C2 都是明确成功行为。",
+      "notes": "窗口中 inject 仍失败，但 whoami/ps、落盘、提权和第二条 C2 都是明确成功行为；失败的 inject 额外上升为 attempted DEFENSE_EVASION。",
       "broad_techniques": [],
       "attack_summary": "CADETS 上重新连回旧 shell 后，再次通过 Nginx exploit 生成新的 drakon in-memory 会话，把 drakon 与 libdrakon 落盘、提权为 root 进程、再次回连，并对 sshd 做多次注入尝试。",
       "source_report_pages": [
@@ -6157,6 +6289,20 @@
             "identity_discovery",
             "process_discovery"
           ]
+        },
+        {
+          "tactic": "DEFENSE_EVASION",
+          "judgment": "attempted",
+          "why": "root drakon 针对 sshd 的多次 inject 都失败了。",
+          "evidence_ids": [
+            "3_14_e017",
+            "3_14_e032",
+            "3_14_e033",
+            "3_14_e034"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
+          ]
         }
       ],
       "technique_rationales": [
@@ -6229,6 +6375,20 @@
           ],
           "behavior_ids": [
             "process_discovery"
+          ]
+        },
+        {
+          "technique_id": "T1055",
+          "judgment": "attempted",
+          "why": "memhelp.so / eraseme / done.so 被用于对 sshd 的 inject 尝试，但都失败。",
+          "evidence_ids": [
+            "3_14_e017",
+            "3_14_e032",
+            "3_14_e033",
+            "3_14_e034"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
           ]
         }
       ],
@@ -11565,7 +11725,8 @@
         "T1189",
         "T1071.001",
         "T1105",
-        "T1046"
+        "T1046",
+        "T1070.004"
       ],
       "attempted_techniques": [],
       "confirmed_tactics": [
@@ -11573,7 +11734,8 @@
         "EXECUTION",
         "PRIVILEGE_ESCALATION",
         "COMMAND_AND_CONTROL",
-        "DISCOVERY"
+        "DISCOVERY",
+        "DEFENSE_EVASION"
       ],
       "attempted_tactics": [],
       "coarse_chain_tags": [
@@ -11581,9 +11743,10 @@
         "c2_callback",
         "payload_write",
         "payload_elevate",
-        "scan"
+        "scan",
+        "file_delete"
       ],
-      "notes": "09:58 的主机重启说明被保留在证据里，但时间窗按真正的攻击交互阶段取 13:41-14:55。",
+      "notes": "09:58 的主机重启说明被保留在证据里，但时间窗按真正的攻击交互阶段取 13:41-14:55；rm clean / rm profile 作为原文明确给出的清理动作，上升为 confirmed DEFENSE_EVASION。",
       "broad_techniques": [],
       "attack_summary": "THEIA 通过恶意网站 exploit Firefox，drakon 两次获得 shell，并把 clean/profile/xdev 等载荷写盘、提权、回连，最后又留下可后续触发的盘上落地物。",
       "source_report_pages": [
@@ -11757,6 +11920,18 @@
           "behavior_ids": [
             "network_scan"
           ]
+        },
+        {
+          "tactic": "DEFENSE_EVASION",
+          "judgment": "confirmed",
+          "why": "rm clean 与 rm profile 是原文直接给出的删除清理动作。",
+          "evidence_ids": [
+            "3_3_e032",
+            "3_3_e034"
+          ],
+          "behavior_ids": [
+            "cleanup_delete"
+          ]
         }
       ],
       "technique_rationales": [
@@ -11815,6 +11990,18 @@
           ],
           "behavior_ids": [
             "network_scan"
+          ]
+        },
+        {
+          "technique_id": "T1070.004",
+          "judgment": "confirmed",
+          "why": "rm clean 与 rm profile 是显式文件删除清理。",
+          "evidence_ids": [
+            "3_3_e032",
+            "3_3_e034"
+          ],
+          "behavior_ids": [
+            "cleanup_delete"
           ]
         }
       ],
@@ -13491,6 +13678,16 @@
             "3_3_e030",
             "3_3_e044"
           ]
+        },
+        {
+          "behavior_id": "cleanup_delete",
+          "action": "file_delete",
+          "judgment": "confirmed",
+          "why": "交互里明确写出 rm clean 与 rm profile，属于成功完成的落地物清理。",
+          "evidence_ids": [
+            "3_3_e032",
+            "3_3_e034"
+          ]
         }
       ]
     },
@@ -13512,7 +13709,9 @@
         "T1057",
         "T1070.004"
       ],
-      "attempted_techniques": [],
+      "attempted_techniques": [
+        "T1055"
+      ],
       "confirmed_tactics": [
         "INITIAL_ACCESS",
         "EXECUTION",
@@ -13521,7 +13720,9 @@
         "DISCOVERY",
         "DEFENSE_EVASION"
       ],
-      "attempted_tactics": [],
+      "attempted_tactics": [
+        "DEFENSE_EVASION"
+      ],
       "coarse_chain_tags": [
         "exploit_delivery",
         "payload_write",
@@ -13533,7 +13734,7 @@
         "identity_discovery",
         "process_discovery"
       ],
-      "notes": "窗口同时记录了 failed injection 与 successful micro path；confirmed tactics 只统计最终成功形成的攻击阶段。",
+      "notes": "窗口同时记录了 failed injection 与 successful micro path；confirmed tactics 统计成功链，failed injection 额外上升为 attempted DEFENSE_EVASION。",
       "broad_techniques": [],
       "attack_summary": "THEIA 上的恶意浏览器扩展攻击通过写盘方式转成成功链：drakon 与 micro apt 分别落盘、注入尝试失败、micro 提权并回连，随后进行大规模端口扫描并删除 mail 落地物。",
       "source_report_pages": [
@@ -13740,6 +13941,25 @@
           "behavior_ids": [
             "cleanup_delete"
           ]
+        },
+        {
+          "tactic": "DEFENSE_EVASION",
+          "judgment": "attempted",
+          "why": "多次向 sshd 注入 xdev/wdev/memtrace.so 的尝试都失败了。",
+          "evidence_ids": [
+            "3_11_e010",
+            "3_11_e012",
+            "3_11_e014",
+            "3_11_e034",
+            "3_11_e035",
+            "3_11_e036",
+            "3_11_e037",
+            "3_11_e038",
+            "3_11_e039"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
+          ]
         }
       ],
       "technique_rationales": [
@@ -13843,6 +14063,25 @@
           ],
           "behavior_ids": [
             "cleanup_delete"
+          ]
+        },
+        {
+          "technique_id": "T1055",
+          "judgment": "attempted",
+          "why": "xdev/wdev/memtrace.so 被多次用于向 sshd 注入，但都失败。",
+          "evidence_ids": [
+            "3_11_e010",
+            "3_11_e012",
+            "3_11_e014",
+            "3_11_e034",
+            "3_11_e035",
+            "3_11_e036",
+            "3_11_e037",
+            "3_11_e038",
+            "3_11_e039"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
           ]
         }
       ],
@@ -18821,7 +19060,9 @@
         "T1057",
         "T1070.004"
       ],
-      "attempted_techniques": [],
+      "attempted_techniques": [
+        "T1055"
+      ],
       "confirmed_tactics": [
         "INITIAL_ACCESS",
         "EXECUTION",
@@ -18829,20 +19070,24 @@
         "DISCOVERY",
         "DEFENSE_EVASION"
       ],
-      "attempted_tactics": [],
+      "attempted_tactics": [
+        "PRIVILEGE_ESCALATION",
+        "DEFENSE_EVASION"
+      ],
       "coarse_chain_tags": [
         "exploit_delivery",
         "process_discovery",
         "payload_write",
         "payload_elevate",
+        "inject_attempt",
         "payload_execute",
         "c2_callback",
         "scan",
         "file_delete"
       ],
-      "notes": "窗口保留了 failed privilege escalation 背景，但 confirmed tactics 只统计已经成功形成的执行、C2、扫描与清理行为。",
+      "notes": "窗口保留了 failed privilege escalation 与 failed injection 背景；confirmed tactics 只统计已经成功形成的执行、C2、扫描与清理，失败的提权/注入则记入 attempted tactics。",
       "broad_techniques": [],
-      "attack_summary": "TRACE 利用恶意密码管理器扩展把 drakon 写盘，再转而落盘/执行 micro apt；micro 成功回连并做端口扫描，同时删除 /tmp/ztmp 临时文件，提权尝试未能稳定成功。",
+      "attack_summary": "TRACE 利用恶意密码管理器扩展把 drakon 写盘，再转而落盘/执行 micro apt；micro 成功回连并做端口扫描，同时删除 /tmp/ztmp 临时文件，提权与向 sshd 注入的尝试都未能稳定成功。",
       "source_report_pages": [
         28,
         29
@@ -18968,6 +19213,29 @@
           "behavior_ids": [
             "cleanup_delete"
           ]
+        },
+        {
+          "tactic": "PRIVILEGE_ESCALATION",
+          "judgment": "attempted",
+          "why": "窗口内出现 elevate ztmp，且正文明确说明 micro 最终无法提权成功。",
+          "evidence_ids": [
+            "3_15_e003",
+            "3_15_e009"
+          ],
+          "behavior_ids": [
+            "payload_elevate"
+          ]
+        },
+        {
+          "tactic": "DEFENSE_EVASION",
+          "judgment": "attempted",
+          "why": "评论中明确写到尝试把 staged file 注入 sshd 进程内存，但最终失败。",
+          "evidence_ids": [
+            "3_15_e003"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
+          ]
         }
       ],
       "technique_rationales": [
@@ -19030,6 +19298,17 @@
           ],
           "behavior_ids": [
             "cleanup_delete"
+          ]
+        },
+        {
+          "technique_id": "T1055",
+          "judgment": "attempted",
+          "why": "评论中明确写到尝试把 staged file 注入 sshd 进程内存，但最终失败。",
+          "evidence_ids": [
+            "3_15_e003"
+          ],
+          "behavior_ids": [
+            "inject_attempt"
           ]
         }
       ],
@@ -20448,6 +20727,15 @@
           ]
         },
         {
+          "behavior_id": "inject_attempt",
+          "action": "inject_attempt",
+          "judgment": "attempted",
+          "why": "评论中明确写到尝试把 staged file 注入 sshd 进程内存，但最终失败。",
+          "evidence_ids": [
+            "3_15_e003"
+          ]
+        },
+        {
           "behavior_id": "payload_execute",
           "action": "payload_execute",
           "judgment": "confirmed",
@@ -20502,27 +20790,30 @@
         "T1566.001",
         "T1204.002",
         "T1071.001",
-        "T1046"
+        "T1046",
+        "T1005"
       ],
       "attempted_techniques": [],
       "confirmed_tactics": [
         "INITIAL_ACCESS",
         "EXECUTION",
         "COMMAND_AND_CONTROL",
-        "DISCOVERY"
+        "DISCOVERY",
+        "COLLECTION"
       ],
       "attempted_tactics": [],
       "coarse_chain_tags": [
         "attachment_open",
         "payload_write",
+        "file_collect",
         "payload_execute",
         "c2_callback",
         "scan",
         "shell_attempt"
       ],
-      "notes": "窗口同时保留 first attachment failed 与 second micro succeeded 两段，但 confirmed tactics 只按成功的 micro 链判定。",
+      "notes": "窗口同时保留 first attachment failed 与 second micro succeeded 两段；由于报告明确说明 tcexfil 用于写出 stolen e-mail data，因此 COLLECTION 也计入 confirmed。",
       "broad_techniques": [],
-      "attack_summary": "TRACE 上的第一封恶意 tcexec 附件邮件失败，第二封把 micro apt 伪装成 tcexec 后成功：用户打开邮件后 micro 自动执行并回连，随后进行端口扫描，shell 命令尝试失败。",
+      "attack_summary": "TRACE 上的第一封恶意 tcexec 附件邮件失败，第二封把 micro apt 伪装成 tcexec 后成功：用户打开邮件后 micro 自动执行并回连，随后进行端口扫描，shell 命令尝试失败；同时 pine backdoor 写出了 tcexfil 本地数据文件。",
       "source_report_pages": [
         40,
         41
@@ -20662,6 +20953,17 @@
           "behavior_ids": [
             "network_scan"
           ]
+        },
+        {
+          "tactic": "COLLECTION",
+          "judgment": "confirmed",
+          "why": "报告明确说明 pine backdoor 会把 stolen e-mail data 写到 tcexfil，而交互中记录了 tcexfil 文件已写出。",
+          "evidence_ids": [
+            "4_9_e024"
+          ],
+          "behavior_ids": [
+            "email_data_collect"
+          ]
         }
       ],
       "technique_rationales": [
@@ -20717,6 +21019,17 @@
           ],
           "behavior_ids": [
             "network_scan"
+          ]
+        },
+        {
+          "technique_id": "T1005",
+          "judgment": "confirmed",
+          "why": "tcexfil 的语义被正文明确说明为 stolen e-mail data 的本地落地文件。",
+          "evidence_ids": [
+            "4_9_e024"
+          ],
+          "behavior_ids": [
+            "email_data_collect"
           ]
         }
       ],
@@ -21529,6 +21842,15 @@
             "4_9_e023",
             "4_9_e024",
             "4_9_e025"
+          ]
+        },
+        {
+          "behavior_id": "email_data_collect",
+          "action": "file_collect",
+          "judgment": "confirmed",
+          "why": "评论明确说明漏洞版 pine 会把 stolen e-mail data 写到 tcexfil，而交互中也确实出现了 tcexfil 落地。",
+          "evidence_ids": [
+            "4_9_e024"
           ]
         },
         {

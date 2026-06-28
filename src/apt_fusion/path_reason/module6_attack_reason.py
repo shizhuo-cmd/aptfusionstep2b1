@@ -663,8 +663,8 @@ def _render_compact_mapping_context(context: dict[str, Any]) -> str:
     return "\n".join(line for line in lines if line.strip()).strip()
 
 
-def _user_prompt_extract(dossier: dict[str, Any]) -> str:
-    claim_graph = build_holmes_claim_graph(dossier)
+def _user_prompt_extract(dossier: dict[str, Any], *, host: str = "") -> str:
+    claim_graph = build_holmes_claim_graph(dossier, host=host)
     candidate_claim_lines = []
     for claim in claim_graph.get("claims", []) or []:
         if isinstance(claim, dict):
@@ -931,7 +931,9 @@ def _claim_has_required_signal(claim: dict[str, Any], dossier: dict[str, Any]) -
             ],
         )
     if behavior in {"clear_logs", "sensitive_temp_rm", "untrusted_file_rm"}:
-        return "B_DELETE_LOG" in labels or any(event_type in {"DELETE", "UNLINK", "RENAME"} for event_type in event_types)
+        # Treat cleanup semantics as true deletion/rename only; plain writes to
+        # log-looking paths were causing CADets false positives.
+        return any(event_type in {"DELETE", "UNLINK", "RENAME"} for event_type in event_types)
     return bool(evidence_ids)
 
 
@@ -1061,8 +1063,8 @@ def _bridge_event_ids_for_exec(dossier: dict[str, Any]) -> list[str]:
     return output[:6]
 
 
-def _fallback_claims(dossier: dict[str, Any], claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    claim_graph = build_holmes_claim_graph(dossier)
+def _fallback_claims(dossier: dict[str, Any], claims: list[dict[str, Any]], *, host: str = "") -> list[dict[str, Any]]:
+    claim_graph = build_holmes_claim_graph(dossier, host=host)
     return _merge_claims(claims, [dict(item) for item in claim_graph.get("claims", []) if isinstance(item, dict)])
 
 
@@ -1661,6 +1663,115 @@ def _apply_behavior_prior_mappings(
     return filtered
 
 
+def _cadets_claim_backed_tactic_backfill(
+    cfg: FusionConfig,
+    dossier: dict[str, Any],
+    claims: list[dict[str, Any]],
+    attack_candidates: dict[str, Any],
+    mappings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if str(cfg.host or "").strip().lower() != "cadets":
+        return mappings
+    if not _tactics_only_enabled(cfg):
+        return mappings
+
+    candidate_tactic_ids = {
+        str(item.get("external_id", "")).strip().upper()
+        for item in attack_candidates.get("tactics", []) or []
+        if isinstance(item, dict) and str(item.get("external_id", "")).strip()
+    }
+    existing_tactic_ids = {
+        str(item.get("tactic_id", "")).strip().upper()
+        for item in mappings
+        if isinstance(item, dict) and str(item.get("tactic_id", "")).strip()
+    }
+    families = {
+        str(item).strip()
+        for item in dossier.get("family_tags", []) or []
+        if str(item).strip()
+    }
+    claim_ids_by_behavior: dict[str, list[str]] = {}
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        claim_id = str(claim.get("claim_id", "")).strip()
+        behavior = str(claim.get("behavior_type", "")).strip().lower()
+        if not claim_id or not behavior:
+            continue
+        claim_ids_by_behavior.setdefault(behavior, []).append(claim_id)
+
+    def _append_mapping(
+        tactic_id: str,
+        evidence_behaviors: list[str],
+        *,
+        confidence: float,
+    ) -> None:
+        nonlocal mappings
+        tactic_id = tactic_id.strip().upper()
+        if not tactic_id or tactic_id in existing_tactic_ids or tactic_id not in candidate_tactic_ids:
+            return
+        evidence_claim_ids: list[str] = []
+        for behavior in evidence_behaviors:
+            for claim_id in claim_ids_by_behavior.get(behavior, []):
+                if claim_id not in evidence_claim_ids:
+                    evidence_claim_ids.append(claim_id)
+        if not evidence_claim_ids:
+            return
+        mappings.append(
+            {
+                "tactic_id": tactic_id,
+                "tactic": _TACTIC_NAME_BY_ID.get(tactic_id, ""),
+                "technique_id": "",
+                "technique": "",
+                "evidence_claim_ids": evidence_claim_ids,
+                "confidence": confidence,
+                "gaps": ["cadets_claim_backfill"],
+            }
+        )
+        existing_tactic_ids.add(tactic_id)
+
+    if (
+        "TA0001" in candidate_tactic_ids
+        and (
+            "initial_or_drop_exec" in families
+            or "attachment_or_tcexec_exec" in families
+            or any(
+                behavior in claim_ids_by_behavior
+                for behavior in ("untrusted_file_exec", "attachment_user_exec", "untrusted_read", "make_file_exec")
+            )
+        )
+    ):
+        _append_mapping(
+            "TA0001",
+            ["untrusted_file_exec", "attachment_user_exec", "untrusted_read", "make_file_exec"],
+            confidence=0.78,
+        )
+
+    if "TA0007" in candidate_tactic_ids and "network_service_discovery" in claim_ids_by_behavior:
+        _append_mapping("TA0007", ["network_service_discovery"], confidence=0.8)
+
+    if "TA0005" in candidate_tactic_ids and any(
+        behavior in claim_ids_by_behavior for behavior in ("clear_logs", "sensitive_temp_rm", "untrusted_file_rm")
+    ):
+        _append_mapping("TA0005", ["clear_logs", "sensitive_temp_rm", "untrusted_file_rm"], confidence=0.8)
+
+    if "TA0004" in candidate_tactic_ids and any(
+        behavior in claim_ids_by_behavior for behavior in ("payload_elevate", "sudo_exec", "switch_su")
+    ):
+        _append_mapping("TA0004", ["payload_elevate", "sudo_exec", "switch_su"], confidence=0.79)
+
+    dedup: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+    for item in mappings:
+        tactic_id = str(item.get("tactic_id", "")).strip().upper()
+        claim_ids = tuple(sorted(str(value).strip() for value in item.get("evidence_claim_ids", []) if str(value).strip()))
+        if not tactic_id or not claim_ids:
+            continue
+        key = (tactic_id, claim_ids)
+        if key not in dedup or float(item.get("confidence", 0.0) or 0.0) > float(dedup[key].get("confidence", 0.0) or 0.0):
+            dedup[key] = item
+    return list(dedup.values())
+
+
 def _synthetic_bundle_for_attack_kb(dossier: dict[str, Any]) -> dict[str, Any]:
     synthetic_events: list[dict[str, Any]] = []
     for item in dossier.get("evidence_timeline", []):
@@ -1785,10 +1896,10 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
             if not task_id or not path_id:
                 continue
             extract_system_prompt = _system_prompt()
-            extract_user_prompt = _user_prompt_extract(dossier)
+            extract_user_prompt = _user_prompt_extract(dossier, host=cfg.host)
             raw_extract = _call_ollama_json(cfg, extract_system_prompt, extract_user_prompt)
-            claim_graph = build_holmes_claim_graph(dossier)
-            claims = _fallback_claims(dossier, _validate_claims(list(raw_extract.get("claims", [])), dossier))
+            claim_graph = build_holmes_claim_graph(dossier, host=cfg.host)
+            claims = _fallback_claims(dossier, _validate_claims(list(raw_extract.get("claims", [])), dossier), host=cfg.host)
             claim_graph = {
                 **claim_graph,
                 "claims": claims,
@@ -1845,6 +1956,7 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
                     claims,
                 )
                 mappings = _apply_behavior_prior_mappings(cfg, dossier, claims, attack_candidates, mappings)
+                mappings = _cadets_claim_backed_tactic_backfill(cfg, dossier, claims, attack_candidates, mappings)
             report = {
                 "task_id": task_id,
                 "path_id": path_id,

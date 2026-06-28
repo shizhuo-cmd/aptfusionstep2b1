@@ -58,6 +58,7 @@ _NETWORK_SEND_TYPES = {"SEND", "CONNECT"}
 _NETWORK_RECV_TYPES = {"RECV", "CONNECT"}
 _DELETE_EVENT_TYPES = {"DELETE", "UNLINK", "RENAME"}
 _SUSPICIOUS_BRIDGE_LABELS = {"O_FILE_DOWNLOADED", "O_FILE_UPLOADED", "O_SUSPECT_WRITTEN_EXECUTABLE", "O_FILE_TEMP"}
+_PAYLOAD_ELEVATE_FOLLOWUP_EXEC_BASENAMES = {"procstat"}
 _ATOM_TO_FAMILY = {
     "attachment_user_exec": "attachment_or_tcexec_exec",
     "untrusted_file_exec": "initial_or_drop_exec",
@@ -432,6 +433,7 @@ def _collect_precursor_event_ids(events: list[dict[str, Any]]) -> list[str]:
 
 def _collect_followup_event_ids(events: list[dict[str, Any]]) -> list[str]:
     output: list[str] = []
+    priority_output: list[str] = []
     for event in events:
         labels = _event_labels(event)
         event_type = str(event.get("event_type", "")).strip().upper()
@@ -447,11 +449,18 @@ def _collect_followup_event_ids(events: list[dict[str, Any]]) -> list[str]:
             if event_id:
                 output.append(event_id)
             continue
+        if event_type == "EXEC":
+            basename = object_key.rsplit("/", 1)[-1].strip()
+            if basename in _PAYLOAD_ELEVATE_FOLLOWUP_EXEC_BASENAMES:
+                event_id = str(event.get("event_id", "")).strip()
+                if event_id:
+                    priority_output.append(event_id)
+                continue
         if event_type in _DELETE_EVENT_TYPES and any(marker in object_key for marker in TEMP_EXEC_MARKERS):
             event_id = str(event.get("event_id", "")).strip()
             if event_id:
                 output.append(event_id)
-    return _sorted_unique(output)[:8]
+    return _sorted_unique(priority_output + output)[:8]
 
 
 def _collect_extra_cleanup_followup_event_ids(
@@ -574,7 +583,7 @@ def _annotate_path_families(
     retained_events: list[dict[str, Any]],
 ) -> None:
     provisional_dossier = build_path_dossier(cfg, path, process_states, object_states, retained_events)
-    claim_graph = build_holmes_claim_graph(provisional_dossier)
+    claim_graph = build_holmes_claim_graph(provisional_dossier, host=cfg.host)
     path.holmes_matched_atoms = _sorted_unique(
         [str(value).strip() for value in claim_graph.get("diagnostics", {}).get("matched_atoms", []) if str(value).strip()]
     )
@@ -729,8 +738,21 @@ def _augment_candidate_support(
             event_lookup[event_id] = event
 
     path_process_set = set(path.process_chain)
+    resolved_process_guids: set[str] = set()
+    path_aliases = {
+        normalize_semantic_text(value)
+        for value in path.process_chain
+        if normalize_semantic_text(value)
+    }
+    for process_guid, state in process_states.items():
+        guid_text = normalize_semantic_text(process_guid)
+        name_text = normalize_semantic_text(state.process_name)
+        if guid_text in path_aliases or name_text in path_aliases:
+            resolved_process_guids.add(process_guid)
+    if not resolved_process_guids:
+        resolved_process_guids = {value for value in path.process_chain if value in process_states}
     support_event_ids: set[str] = set()
-    for process_guid in path.process_chain:
+    for process_guid in sorted(resolved_process_guids):
         state = process_states.get(process_guid)
         if state is None:
             continue
@@ -745,7 +767,8 @@ def _augment_candidate_support(
                 support_event_ids.add(text)
     for event in retained_events:
         process_guid = str(event.get("process_guid", "")).strip()
-        if process_guid not in path_process_set:
+        process_name = normalize_semantic_text(event.get("process_name", ""))
+        if process_guid not in resolved_process_guids and process_name not in path_aliases:
             continue
         labels = event.get("path_labels_triggered", []) or event.get("labels_triggered", []) or []
         if not labels:
@@ -756,7 +779,7 @@ def _augment_candidate_support(
     ordered_event_ids = sorted(support_event_ids, key=lambda item: _event_order_key(item, event_lookup))
 
     support_object_keys: set[str] = set()
-    for process_guid in path.process_chain:
+    for process_guid in sorted(resolved_process_guids):
         state = process_states.get(process_guid)
         if state is None:
             continue
@@ -777,7 +800,7 @@ def _augment_candidate_support(
     ordered_object_keys = sorted(support_object_keys)
 
     context_ids: set[str] = set()
-    for process_guid in path.process_chain:
+    for process_guid in sorted(resolved_process_guids):
         state = process_states.get(process_guid)
         if state is None:
             continue
@@ -826,7 +849,7 @@ def _augment_candidate_support(
     extra_cleanup_followup_ids = _collect_extra_cleanup_followup_event_ids(
         support_events,
         retained_events,
-        path_process_set=path_process_set,
+        path_process_set=set(resolved_process_guids),
         suspicious_object_keys=staged_object_keys_from_bridge_edges(path.bridge_edges),
     )
     if extra_cleanup_followup_ids:

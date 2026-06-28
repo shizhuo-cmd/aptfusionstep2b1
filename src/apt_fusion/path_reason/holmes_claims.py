@@ -12,6 +12,7 @@ from .chain_semantics import (
     collect_staged_exec_event_ids,
     is_placeholder_object_key,
     is_system_service_object_key,
+    is_temp_exec_path,
     item_timestamp,
     normalize_semantic_text,
     staged_object_keys_from_bridge_edges,
@@ -231,6 +232,7 @@ _DELETE_EVENT_TYPES = {"DELETE", "UNLINK", "RENAME"}
 _LOG_PATH_MARKERS = ("/var/log/", ".log", "lastlog", "wtmp", "btmp", "utmp", "messages", "secure")
 _TEMP_CLEANUP_MARKERS = ("/tmp/", "/var/tmp/", "/dev/shm/", "ztmp", "gtcache")
 _STAGED_OBJECT_ROLE_LABELS = {"O_SUSPECT_WRITTEN_EXECUTABLE", "O_FILE_DOWNLOADED", "O_FILE_UPLOADED", "O_FILE_TEMP"}
+_PAYLOAD_ELEVATE_CHILD_EXEC_BASENAMES = {"procstat"}
 
 
 def _normalize_text(value: Any) -> str:
@@ -289,6 +291,131 @@ def _event_ids_from_items(items: list[dict[str, Any]], limit: int = 8) -> list[s
         if len(output) >= limit:
             break
     return output
+
+
+def _principal_change_payload_elevate_ids(
+    dossier: dict[str, Any],
+    *,
+    staged_exec_ids: list[str],
+    limit: int = 8,
+) -> list[str]:
+    if not staged_exec_ids:
+        return []
+    timeline = dossier.get("evidence_timeline", []) or []
+    timeline_by_id = _timeline_by_id(dossier)
+    staged_items = [timeline_by_id[event_id] for event_id in staged_exec_ids if event_id in timeline_by_id]
+    if not staged_items:
+        return []
+
+    def _process_keys(item: dict[str, Any]) -> set[str]:
+        keys: set[str] = set()
+        for key in ("process_guid", "process_id", "process_name", "object_key"):
+            text = _normalize_text(item.get(key, ""))
+            if text:
+                keys.add(text)
+        return keys
+
+    staged_process_keys: set[str] = set()
+    staged_timestamps = [item_timestamp(item) for item in staged_items if item_timestamp(item) is not None]
+    for item in staged_items:
+        staged_process_keys.update(_process_keys(item))
+
+    output: list[str] = []
+    for item in timeline:
+        if str(item.get("event_type", "")).strip().upper() != "CHANGE_PRINCIPAL":
+            continue
+        event_id = str(item.get("event_id", "")).strip()
+        if not event_id:
+            continue
+        if not _process_keys(item).intersection(staged_process_keys):
+            continue
+        principal_ts = item_timestamp(item)
+        if principal_ts is not None and staged_timestamps:
+            if not any(abs((principal_ts - staged_ts).total_seconds()) <= 300 for staged_ts in staged_timestamps):
+                continue
+        output.append(event_id)
+        if len(output) >= limit:
+            break
+    return _unique_event_ids(output)[:limit]
+
+
+def _child_exec_payload_elevate_ids(
+    dossier: dict[str, Any],
+    *,
+    staged_exec_ids: list[str],
+    limit: int = 8,
+) -> list[str]:
+    if not staged_exec_ids:
+        return []
+    timeline = dossier.get("evidence_timeline", []) or []
+    timeline_by_id = _timeline_by_id(dossier)
+    staged_items = [timeline_by_id[event_id] for event_id in staged_exec_ids if event_id in timeline_by_id]
+    if not staged_items:
+        return []
+
+    def _process_keys(item: dict[str, Any]) -> set[str]:
+        keys: set[str] = set()
+        for key in ("process_guid", "process_id", "process_name", "object_key"):
+            text = _normalize_text(item.get(key, ""))
+            if text:
+                keys.add(text)
+        return keys
+
+    staged_process_keys: set[str] = set()
+    staged_timestamps = [item_timestamp(item) for item in staged_items if item_timestamp(item) is not None]
+    for item in staged_items:
+        staged_process_keys.update(_process_keys(item))
+
+    child_process_keys: set[str] = set()
+    output: list[str] = []
+    for item in timeline:
+        event_type = str(item.get("event_type", "")).strip().upper()
+        if event_type not in {"FORK", "CLONE"}:
+            continue
+        event_id = str(item.get("event_id", "")).strip()
+        if not event_id:
+            continue
+        if not _process_keys(item).intersection(staged_process_keys):
+            continue
+        child_key = _normalize_text(item.get("object_key", ""))
+        if not child_key:
+            continue
+        fork_ts = item_timestamp(item)
+        if fork_ts is not None and staged_timestamps:
+            if not any(0.0 <= (fork_ts - staged_ts).total_seconds() <= 300 for staged_ts in staged_timestamps):
+                continue
+        child_process_keys.add(child_key)
+        output.append(event_id)
+        if len(output) >= limit:
+            break
+
+    for item in timeline:
+        event_type = str(item.get("event_type", "")).strip().upper()
+        if event_type != "EXEC":
+            continue
+        event_id = str(item.get("event_id", "")).strip()
+        if not event_id:
+            continue
+        process_name = _normalize_text(item.get("process_name", ""))
+        process_guid = _normalize_text(item.get("process_guid", ""))
+        if child_process_keys:
+            if process_name not in child_process_keys and process_guid not in child_process_keys:
+                continue
+        else:
+            if process_name in staged_process_keys or process_guid in staged_process_keys:
+                continue
+        object_key = _normalize_text(item.get("object_key", ""))
+        basename = object_key.rsplit("/", 1)[-1].strip()
+        if basename not in _PAYLOAD_ELEVATE_CHILD_EXEC_BASENAMES:
+            continue
+        exec_ts = item_timestamp(item)
+        if exec_ts is not None and staged_timestamps:
+            if not any(0.0 <= (exec_ts - staged_ts).total_seconds() <= 300 for staged_ts in staged_timestamps):
+                continue
+        output.append(event_id)
+        if len(output) >= limit:
+            break
+    return _unique_event_ids(output)[:limit]
 
 
 def _core_process_labels(dossier: dict[str, Any]) -> set[str]:
@@ -534,6 +661,25 @@ def _bridge_exec_event_ids(dossier: dict[str, Any]) -> list[str]:
     return output
 
 
+def _direct_staged_exec_event_ids(dossier: dict[str, Any]) -> list[str]:
+    output: list[str] = []
+    for item in dossier.get("evidence_timeline", []) or []:
+        if not isinstance(item, dict):
+            continue
+        event_id = str(item.get("event_id", "")).strip()
+        if not event_id:
+            continue
+        if _timeline_item_event_type(item) not in {"EXEC", "LOAD"}:
+            continue
+        object_key = _normalize_text(item.get("object_key", ""))
+        if not object_key or is_placeholder_object_key(object_key) or is_system_service_object_key(object_key):
+            continue
+        labels = _timeline_item_object_labels(item).union(_timeline_item_labels(item))
+        if is_temp_exec_path(object_key) or labels.intersection(_STAGED_OBJECT_ROLE_LABELS):
+            output.append(event_id)
+    return _unique_event_ids(output)
+
+
 def _timeline_position_by_id(dossier: dict[str, Any]) -> dict[str, int]:
     positions: dict[str, int] = {}
     for index, item in enumerate(dossier.get("evidence_timeline", []) or []):
@@ -636,10 +782,11 @@ def _candidate_precursor_ids(dossier: dict[str, Any], blob: str) -> list[str]:
     return collect_precursor_event_ids(items, suspicious_object_keys=suspicious_object_keys, limit=8)
 
 
-def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
+def build_holmes_claim_graph(dossier: dict[str, Any], *, host: str = "") -> dict[str, Any]:
     timeline_by_id = _timeline_by_id(dossier)
     labels = _core_process_labels(dossier)
     blob = _text_blob(dossier)
+    cadets_mode = str(host or "").strip().lower() == "cadets"
 
     external_recv_ids = _event_ids_from_items(
         _timeline_items_for_predicate(
@@ -707,6 +854,8 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
     )
     precursor_ids = _candidate_precursor_ids(dossier, blob)
     bridge_exec_ids = _bridge_exec_event_ids(dossier)
+    direct_staged_exec_ids = _direct_staged_exec_event_ids(dossier) if cadets_mode else []
+    exec_ids = _unique_event_ids(exec_ids + direct_staged_exec_ids)
     temp_remove_ids = _event_ids_from_items(
         _timeline_items_for_predicate(
             dossier,
@@ -747,7 +896,7 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
         shell_exec_ids
         or precursor_ids
         or attachment_ids
-        or (bridge_exec_ids and not browser_only_context)
+        or ((bridge_exec_ids or direct_staged_exec_ids) and not browser_only_context)
     )
 
     claims: list[dict[str, Any]] = []
@@ -780,8 +929,25 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    if external_recv_ids:
-        add_claim("untrusted_read", external_recv_ids, 0.74, ["external_recv"])
+    untrusted_read_allowed = bool(external_recv_ids)
+    if cadets_mode:
+        untrusted_read_allowed = bool(
+            external_recv_ids
+            and (
+                strong_exec_context
+                or browser_mail_context
+                or attachment_ids
+                or bridge_exec_ids
+                or direct_staged_exec_ids
+            )
+        )
+    if untrusted_read_allowed:
+        support_signals = ["external_recv"]
+        if strong_exec_context:
+            support_signals.append("exec_context")
+        elif browser_mail_context:
+            support_signals.append("browser_context")
+        add_claim("untrusted_read", external_recv_ids, 0.74, support_signals)
     staged_object_keys = staged_object_keys_from_bridge_edges(dossier.get("bridge_edges", []) or [])
     staged_chmod_ids = collect_staged_chmod_event_ids(
         dossier.get("evidence_timeline", []) or [],
@@ -810,8 +976,14 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
         add_claim("make_mem_exec", mem_exec_ids + external_recv_ids + precursor_ids, 0.77, ["mem_exec", "precursor_dependency"])
     if staged_chmod_ids:
         add_claim("make_file_exec", staged_chmod_ids + staged_exec_ids + bridge_exec_ids, 0.78, ["chmod_exec", "staged_object"])
-    if bridge_exec_ids:
-        add_claim("untrusted_file_exec", bridge_exec_ids + external_recv_ids, 0.84, ["bridge_exec", "staged_object"])
+    direct_or_bridge_exec_ids = _unique_event_ids(bridge_exec_ids + direct_staged_exec_ids)
+    if direct_or_bridge_exec_ids:
+        support_signals = ["staged_object"]
+        if bridge_exec_ids:
+            support_signals.append("bridge_exec")
+        if direct_staged_exec_ids:
+            support_signals.append("direct_staged_exec")
+        add_claim("untrusted_file_exec", direct_or_bridge_exec_ids + external_recv_ids, 0.84, support_signals)
     if attachment_ids:
         add_claim("attachment_user_exec", attachment_ids + bridge_exec_ids, 0.82, ["attachment_markers"])
     if shell_exec_ids:
@@ -848,8 +1020,38 @@ def build_holmes_claim_graph(dossier: dict[str, Any]) -> dict[str, Any]:
         suspicious_object_keys=staged_object_keys,
         limit=8,
     )
+    if cadets_mode and not payload_elevate_ids:
+        payload_elevate_ids = _principal_change_payload_elevate_ids(
+            dossier,
+            staged_exec_ids=_unique_event_ids(staged_exec_ids + direct_or_bridge_exec_ids),
+            limit=8,
+        )
+    if cadets_mode and not payload_elevate_ids:
+        payload_elevate_ids = _child_exec_payload_elevate_ids(
+            dossier,
+            staged_exec_ids=_unique_event_ids(staged_exec_ids + direct_or_bridge_exec_ids),
+            limit=8,
+        )
     if payload_elevate_ids and strong_exec_context:
-        add_claim("payload_elevate", payload_elevate_ids + bridge_exec_ids[:2], 0.81, ["payload_elevate"])
+        support_signals = ["payload_elevate"]
+        if cadets_mode and any(
+            str(_timeline_by_id(dossier).get(event_id, {}).get("event_type", "")).strip().upper() == "CHANGE_PRINCIPAL"
+            for event_id in payload_elevate_ids
+        ):
+            support_signals.append("principal_change")
+        if cadets_mode and any(
+            str(_timeline_by_id(dossier).get(event_id, {}).get("event_type", "")).strip().upper() == "EXEC"
+            and _normalize_text(_timeline_by_id(dossier).get(event_id, {}).get("object_key", "")).rsplit("/", 1)[-1].strip()
+            in _PAYLOAD_ELEVATE_CHILD_EXEC_BASENAMES
+            for event_id in payload_elevate_ids
+        ):
+            support_signals.append("child_exec_followup")
+        add_claim(
+            "payload_elevate",
+            payload_elevate_ids + staged_exec_ids[:2] + bridge_exec_ids[:2],
+            0.81,
+            support_signals,
+        )
     sensitive_read_ids: list[str] = []
     sensitive_read_signals: list[str] = []
     if strong_sensitive_ids and strong_exec_context:

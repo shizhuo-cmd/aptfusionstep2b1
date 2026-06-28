@@ -12,10 +12,10 @@
 
 | Host | Window Count | Confirmed | Attempted Failed | Insufficient | Confirmed Tactics | Attempted Tactics |
 | --- | ---: | ---: | ---: | ---: | --- | --- |
-| CADETS | 5 | 4 | 0 | 1 | COMMAND_AND_CONTROL, DEFENSE_EVASION, DISCOVERY, EXECUTION, INITIAL_ACCESS, PRIVILEGE_ESCALATION | - |
+| CADETS | 5 | 4 | 0 | 1 | COMMAND_AND_CONTROL, DEFENSE_EVASION, DISCOVERY, EXECUTION, INITIAL_ACCESS, PRIVILEGE_ESCALATION | DEFENSE_EVASION, PRIVILEGE_ESCALATION |
 | FIVEDIRECTIONS | 4 | 2 | 1 | 1 | COLLECTION, COMMAND_AND_CONTROL, DEFENSE_EVASION, DISCOVERY, EXECUTION, EXFILTRATION, INITIAL_ACCESS | EXECUTION, INITIAL_ACCESS |
-| THEIA | 4 | 3 | 1 | 0 | COMMAND_AND_CONTROL, CREDENTIAL_ACCESS, DEFENSE_EVASION, DISCOVERY, EXECUTION, INITIAL_ACCESS, PRIVILEGE_ESCALATION | EXECUTION, INITIAL_ACCESS |
-| TRACE | 5 | 4 | 1 | 0 | COMMAND_AND_CONTROL, CREDENTIAL_ACCESS, DEFENSE_EVASION, DISCOVERY, EXECUTION, INITIAL_ACCESS, PRIVILEGE_ESCALATION | EXECUTION, INITIAL_ACCESS |
+| THEIA | 4 | 3 | 1 | 0 | COMMAND_AND_CONTROL, CREDENTIAL_ACCESS, DEFENSE_EVASION, DISCOVERY, EXECUTION, INITIAL_ACCESS, PRIVILEGE_ESCALATION | DEFENSE_EVASION, EXECUTION, INITIAL_ACCESS |
+| TRACE | 5 | 4 | 1 | 0 | COLLECTION, COMMAND_AND_CONTROL, CREDENTIAL_ACCESS, DEFENSE_EVASION, DISCOVERY, EXECUTION, INITIAL_ACCESS, PRIVILEGE_ESCALATION | DEFENSE_EVASION, EXECUTION, INITIAL_ACCESS, PRIVILEGE_ESCALATION |
 
 ## CADETS
 
@@ -28,7 +28,7 @@
 - Markdown 行号：`158-237`
 - 报告页：`3, 4`
 - 攻击概述：CADETS 上的 Nginx 被成功利用，drakon/operator console 回连建立，攻击者提权运行 netrecon 并尝试向 sshd 注入 libdrakon，最终 CADETS 崩溃。
-- 备注：窗口只把成功攻击链记为 confirmed；失败的 sshd 注入单独保留在 behavior_chain 中，不上升为窗口级 attempted tactics。
+- 备注：窗口只把成功攻击链记为 confirmed；失败的 sshd 注入除保留在 behavior_chain 外，也上升为 attempted DEFENSE_EVASION。
 
 #### 战术判定
 
@@ -39,6 +39,7 @@
 | PRIVILEGE_ESCALATION | confirmed | 提权 | 正文明确写到新进程以 root 权限运行。 | 3_1_e001, 3_1_e006, 3_1_e025 |
 | COMMAND_AND_CONTROL | confirmed | 命令控制 | drakon/operator console 回连在多处证据中被直接描述。 | 3_1_e001, 3_1_e005, 3_1_e028, 3_1_e029 |
 | DISCOVERY | confirmed | 侦察发现 | 攻击者执行 nrinfo/nrtcp 与 ps，对网络和进程做侦察。 | 3_1_e001, 3_1_e007, 3_1_e008, 3_1_e009, 3_1_e031, 3_1_e011 |
+| DEFENSE_EVASION | attempted | 防御规避 | 报告明确记录了向 sshd 注入 libdrakon 的尝试，但最终失败并导致主机崩溃。 | 3_1_e001, 3_1_e003, 3_1_e012, 3_1_e013, 3_1_e014, 3_1_e024 |
 
 #### Technique 判定
 
@@ -49,6 +50,7 @@
 | T1105 | confirmed | 攻击者把 drakon/libdrakon/netrecon 等组件传入主机使用。 | 3_1_e001, 3_1_e010, 3_1_e013, 3_1_e023, 3_1_e024 |
 | T1046 | confirmed | nrtcp/netrecon 明确对应网络服务侦察。 | 3_1_e001, 3_1_e007, 3_1_e008, 3_1_e009, 3_1_e031 |
 | T1057 | confirmed | Event Log 中有直接的 ps 进程枚举。 | 3_1_e011 |
+| T1055 | attempted | libdrakon 被用于对 sshd 进程做 inject 尝试，但最终失败。 | 3_1_e001, 3_1_e003, 3_1_e012, 3_1_e013, 3_1_e014, 3_1_e024 |
 
 #### Behavior Chain
 
@@ -437,7 +439,7 @@
 - Markdown 行号：`701-754`
 - 报告页：`16, 17`
 - 攻击概述：CADETS 再次通过 Nginx malformed HTTP request 成功拿到 drakon in-memory shell，并把 libdrakon 落盘后尝试注入 sshd，最终再次导致主机崩溃。
-- 备注：这一节成功确认了 exploit、shell/C2 和载荷落盘；失败的 inject 单独保存在行为链，不上升为窗口级 attempted tactics。
+- 备注：这一节成功确认了 exploit、shell/C2 和载荷落盘；失败的 inject 既保留在行为链，也上升为 attempted DEFENSE_EVASION。
 
 #### 战术判定
 
@@ -446,6 +448,7 @@
 | INITIAL_ACCESS | confirmed | 初始进入 | Nginx exploit 成功进入 CADETS。 | 3_8_e001, 3_8_e003 |
 | EXECUTION | confirmed | 执行 | drakon 在 nginx 内存中运行，libdrakon 也被写盘准备执行/注入。 | 3_8_e001, 3_8_e003, 3_8_e004, 3_8_e006, 3_8_e007, 3_8_e013, 3_8_e015, 3_8_e016 |
 | COMMAND_AND_CONTROL | confirmed | 命令控制 | operator console shell 已被成功建立。 | 3_8_e001, 3_8_e019 |
+| DEFENSE_EVASION | attempted | 防御规避 | grain 被用于向 sshd 注入，但最终失败并造成 kernel panic。 | 3_8_e002, 3_8_e007, 3_8_e008, 3_8_e016 |
 
 #### Technique 判定
 
@@ -454,6 +457,7 @@
 | T1190 | confirmed | Nginx 公网服务被利用。 | 3_8_e001, 3_8_e003 |
 | T1071.001 | confirmed | shell 通过 HTTP/operator console 连接。 | 3_8_e001, 3_8_e019 |
 | T1105 | confirmed | libdrakon 作为注入载荷被传入目标。 | 3_8_e004, 3_8_e006, 3_8_e007, 3_8_e013, 3_8_e015, 3_8_e016 |
+| T1055 | attempted | grain 被明确用于对 sshd 进程做 inject 尝试，但最终失败。 | 3_8_e002, 3_8_e007, 3_8_e008, 3_8_e016 |
 
 #### Behavior Chain
 
@@ -632,7 +636,7 @@
 - Markdown 行号：`994-1101`
 - 报告页：`23, 24, 25`
 - 攻击概述：CADETS 上再次成功利用 Nginx，drakon/XIM 与 micro 两条链并行推进：多次传入 drakon/libdrakon/microapt，最终 XIM 提权成功、micro 落盘执行并回连，再对多个内网地址做端口扫描，同时清理若干临时文件。
-- 备注：这一节是 CADETS 里最完整的成功链之一，因此保留了提权、C2、扫描和清理四类强信号。
+- 备注：这一节是 CADETS 里最完整的成功链之一；除成功的 drakon 提权外，也保留 micro 等多次失败的提权尝试为 attempted PRIVILEGE_ESCALATION。
 
 #### 战术判定
 
@@ -644,6 +648,7 @@
 | COMMAND_AND_CONTROL | confirmed | 命令控制 | XIM 与 micro sendmail 都形成了对外 C2 连接。 | 3_13_e001, 3_13_e056, 3_13_e057 |
 | DISCOVERY | confirmed | 侦察发现 | Micro APT 针对多个目标和端口做扫描。 | 3_13_e002, 3_13_e058, 3_13_e059, 3_13_e060, 3_13_e061, 3_13_e062, 3_13_e063, 3_13_e064 |
 | DEFENSE_EVASION | confirmed | 防御规避 | 大量临时/载荷文件被删除，属于显式清理行为。 | 3_13_e016, 3_13_e017, 3_13_e019, 3_13_e026, 3_13_e027, 3_13_e029, 3_13_e031, 3_13_e033, 3_13_e035 |
+| PRIVILEGE_ESCALATION | attempted | 提权 | micro 相关载荷有多次 failed elevate，属于窗口内明确发生但未成功的提权尝试。 | 3_13_e001, 3_13_e036, 3_13_e037, 3_13_e038, 3_13_e039, 3_13_e040, 3_13_e044, 3_13_e045, 3_13_e046, 3_13_e049, 3_13_e050, 3_13_e051 |
 
 #### Technique 判定
 
@@ -666,6 +671,7 @@
 | c2_callback | c2_callback | confirmed | XIM 与 sendmail(micro) 都形成了对外回连。 | 3_13_e001, 3_13_e056, 3_13_e057 |
 | network_scan | scan | confirmed | sendmail(Micro APT) 交互里有连续的 APT>scan 记录。 | 3_13_e002, 3_13_e058, 3_13_e059, 3_13_e060, 3_13_e061, 3_13_e062, 3_13_e063, 3_13_e064 |
 | cleanup_delete | file_delete | confirmed | grain/vUGefai/tmux-1002/minion/XIM/netlog/sendmail/main/test 等文件有多次 rm 清理。 | 3_13_e016, 3_13_e017, 3_13_e019, 3_13_e026, 3_13_e027, 3_13_e029, 3_13_e031, 3_13_e033, 3_13_e035 |
+| payload_elevate_attempt | payload_elevate | attempted | micro 相关载荷存在多次 failed elevate，说明窗口内确有失败的提权尝试。 | 3_13_e001, 3_13_e036, 3_13_e037, 3_13_e038, 3_13_e039, 3_13_e040, 3_13_e044, 3_13_e045, 3_13_e046, 3_13_e049, 3_13_e050, 3_13_e051 |
 
 #### 显式观测
 
@@ -1110,7 +1116,7 @@
 - Markdown 行号：`1102-1175`
 - 报告页：`26, 27`
 - 攻击概述：CADETS 上重新连回旧 shell 后，再次通过 Nginx exploit 生成新的 drakon in-memory 会话，把 drakon 与 libdrakon 落盘、提权为 root 进程、再次回连，并对 sshd 做多次注入尝试。
-- 备注：窗口中 inject 仍失败，但 whoami/ps、落盘、提权和第二条 C2 都是明确成功行为。
+- 备注：窗口中 inject 仍失败，但 whoami/ps、落盘、提权和第二条 C2 都是明确成功行为；失败的 inject 额外上升为 attempted DEFENSE_EVASION。
 
 #### 战术判定
 
@@ -1121,6 +1127,7 @@
 | PRIVILEGE_ESCALATION | confirmed | 提权 | 新的 drakon 进程以 root 权限运行。 | 3_14_e001, 3_14_e010, 3_14_e031 |
 | COMMAND_AND_CONTROL | confirmed | 命令控制 | 旧 shell reconnect 与新的 root drakon/operator console 连接都已形成。 | 3_14_e003, 3_14_e001, 3_14_e011, 3_14_e012, 3_14_e038 |
 | DISCOVERY | confirmed | 侦察发现 | whoami 和 ps/sshd PID 枚举共同支撑身份与进程侦察。 | 3_14_e004, 3_14_e013, 3_14_e014, 3_14_e015, 3_14_e016 |
+| DEFENSE_EVASION | attempted | 防御规避 | root drakon 针对 sshd 的多次 inject 都失败了。 | 3_14_e017, 3_14_e032, 3_14_e033, 3_14_e034 |
 
 #### Technique 判定
 
@@ -1131,6 +1138,7 @@
 | T1105 | confirmed | drakon 与 libdrakon 被传入并落盘复制。 | 3_14_e008, 3_14_e009, 3_14_e026, 3_14_e027, 3_14_e028, 3_14_e029, 3_14_e030 |
 | T1033 | confirmed | whoami 明确对应身份发现。 | 3_14_e004, 3_14_e013 |
 | T1057 | confirmed | ps 与 sshd PID 对应进程发现。 | 3_14_e014, 3_14_e015, 3_14_e016 |
+| T1055 | attempted | memhelp.so / eraseme / done.so 被用于对 sshd 的 inject 尝试，但都失败。 | 3_14_e017, 3_14_e032, 3_14_e033, 3_14_e034 |
 
 #### Behavior Chain
 
@@ -2311,7 +2319,7 @@
 - Markdown 行号：`320-421`
 - 报告页：`7, 8, 9`
 - 攻击概述：THEIA 通过恶意网站 exploit Firefox，drakon 两次获得 shell，并把 clean/profile/xdev 等载荷写盘、提权、回连，最后又留下可后续触发的盘上落地物。
-- 备注：09:58 的主机重启说明被保留在证据里，但时间窗按真正的攻击交互阶段取 13:41-14:55。
+- 备注：09:58 的主机重启说明被保留在证据里，但时间窗按真正的攻击交互阶段取 13:41-14:55；rm clean / rm profile 作为原文明确给出的清理动作，上升为 confirmed DEFENSE_EVASION。
 
 #### 战术判定
 
@@ -2322,6 +2330,7 @@
 | PRIVILEGE_ESCALATION | confirmed | 提权 | 正文明确写明新的 drakon 进程以 root 身份运行。 | 3_3_e001, 3_3_e014, 3_3_e036, 3_3_e037 |
 | COMMAND_AND_CONTROL | confirmed | 命令控制 | shell、connect back 与 profile 对外连接共同表明已形成 C2。 | 3_3_e001, 3_3_e016, 3_3_e043 |
 | DISCOVERY | confirmed | 侦察发现 | nrtcp/netrecon 对网络接口与可达性做侦察。 | 3_3_e030, 3_3_e044 |
+| DEFENSE_EVASION | confirmed | 防御规避 | rm clean 与 rm profile 是原文直接给出的删除清理动作。 | 3_3_e032, 3_3_e034 |
 
 #### Technique 判定
 
@@ -2331,6 +2340,7 @@
 | T1071.001 | confirmed | operator console 与 drakon 的通信走 web/HTTP 风格地址。 | 3_3_e001, 3_3_e016, 3_3_e043 |
 | T1105 | confirmed | putfile 明确把 drakon/libdrakon 组件写入目标。 | 3_3_e013, 3_3_e020, 3_3_e021, 3_3_e035 |
 | T1046 | confirmed | nrtcp/netrecon 对目标网络进行侦察。 | 3_3_e030, 3_3_e044 |
+| T1070.004 | confirmed | rm clean 与 rm profile 是显式文件删除清理。 | 3_3_e032, 3_3_e034 |
 
 #### Behavior Chain
 
@@ -2341,6 +2351,7 @@
 | payload_write | payload_write | confirmed | putfile clean/profile/xdev 直接记录了落地载荷与后续待用文件。 | 3_3_e013, 3_3_e020, 3_3_e021, 3_3_e035 |
 | payload_elevate | payload_elevate | confirmed | 正文写明 drakon 以 root 运行，交互里也有 elevate clean/profile。 | 3_3_e001, 3_3_e014, 3_3_e036, 3_3_e037 |
 | network_scan | scan | confirmed | 连接交互中出现 L2>nrtcp，说明使用 netrecon 做网络探测。 | 3_3_e030, 3_3_e044 |
+| cleanup_delete | file_delete | confirmed | 交互里明确写出 rm clean 与 rm profile，属于成功完成的落地物清理。 | 3_3_e032, 3_3_e034 |
 
 #### 显式观测
 
@@ -2674,7 +2685,7 @@
 - Markdown 行号：`852-964`
 - 报告页：`20, 21`
 - 攻击概述：THEIA 上的恶意浏览器扩展攻击通过写盘方式转成成功链：drakon 与 micro apt 分别落盘、注入尝试失败、micro 提权并回连，随后进行大规模端口扫描并删除 mail 落地物。
-- 备注：窗口同时记录了 failed injection 与 successful micro path；confirmed tactics 只统计最终成功形成的攻击阶段。
+- 备注：窗口同时记录了 failed injection 与 successful micro path；confirmed tactics 统计成功链，failed injection 额外上升为 attempted DEFENSE_EVASION。
 
 #### 战术判定
 
@@ -2686,6 +2697,7 @@
 | COMMAND_AND_CONTROL | confirmed | 命令控制 | gtcache/drakon 与 micro listener 的外连共同说明已形成控制通道。 | 3_11_e001, 3_11_e017, 3_11_e024, 3_11_e041, 3_11_e044 |
 | DISCOVERY | confirmed | 侦察发现 | whoami、ps 和多批次 APT>scan 同时覆盖身份、进程和网络侦察。 | 3_11_e007, 3_11_e008, 3_11_e009, 3_11_e001, 3_11_e045, 3_11_e050, 3_11_e051, 3_11_e052, 3_11_e053, 3_11_e054, 3_11_e055, 3_11_e056, 3_11_e057, 3_11_e058, 3_11_e059, 3_11_e060 |
 | DEFENSE_EVASION | confirmed | 防御规避 | mail/xdev/wdev 等落地物被删除，属于明确的痕迹清理/落地物清理。 | 3_11_e018, 3_11_e028, 3_11_e029, 3_11_e030, 3_11_e033 |
+| DEFENSE_EVASION | attempted | 防御规避 | 多次向 sshd 注入 xdev/wdev/memtrace.so 的尝试都失败了。 | 3_11_e010, 3_11_e012, 3_11_e014, 3_11_e034, 3_11_e035, 3_11_e036, 3_11_e037, 3_11_e038, 3_11_e039 |
 
 #### Technique 判定
 
@@ -2698,6 +2710,7 @@
 | T1033 | confirmed | whoami 明确对应身份发现。 | 3_11_e007 |
 | T1057 | confirmed | ps 与 sshd PID 枚举明确对应进程发现。 | 3_11_e008, 3_11_e009 |
 | T1070.004 | confirmed | rm mail/xdev/wdev 是明确的文件删除清理。 | 3_11_e018, 3_11_e028, 3_11_e029, 3_11_e030, 3_11_e033 |
+| T1055 | attempted | xdev/wdev/memtrace.so 被多次用于向 sshd 注入，但都失败。 | 3_11_e010, 3_11_e012, 3_11_e014, 3_11_e034, 3_11_e035, 3_11_e036, 3_11_e037, 3_11_e038, 3_11_e039 |
 
 #### Behavior Chain
 
@@ -3772,8 +3785,8 @@
 - 时间窗：`2018-04-13T12:43:00` -> `2018-04-13T12:53:00`
 - Markdown 行号：`1176-1257`
 - 报告页：`28, 29`
-- 攻击概述：TRACE 利用恶意密码管理器扩展把 drakon 写盘，再转而落盘/执行 micro apt；micro 成功回连并做端口扫描，同时删除 /tmp/ztmp 临时文件，提权尝试未能稳定成功。
-- 备注：窗口保留了 failed privilege escalation 背景，但 confirmed tactics 只统计已经成功形成的执行、C2、扫描与清理行为。
+- 攻击概述：TRACE 利用恶意密码管理器扩展把 drakon 写盘，再转而落盘/执行 micro apt；micro 成功回连并做端口扫描，同时删除 /tmp/ztmp 临时文件，提权与向 sshd 注入的尝试都未能稳定成功。
+- 备注：窗口保留了 failed privilege escalation 与 failed injection 背景；confirmed tactics 只统计已经成功形成的执行、C2、扫描与清理，失败的提权/注入则记入 attempted tactics。
 
 #### 战术判定
 
@@ -3784,6 +3797,8 @@
 | COMMAND_AND_CONTROL | confirmed | 命令控制 | micro callback 是明确的控制连接。 | 3_15_e001, 3_15_e011 |
 | DISCOVERY | confirmed | 侦察发现 | ps/sshd PID 与 micro portscan/netrecon 共同支撑侦察行为。 | 3_15_e006, 3_15_e007, 3_15_e001, 3_15_e012, 3_15_e014 |
 | DEFENSE_EVASION | confirmed | 防御规避 | rm /tmp/ztmp 是明确的落地物清理。 | 3_15_e013 |
+| PRIVILEGE_ESCALATION | attempted | 提权 | 窗口内出现 elevate ztmp，且正文明确说明 micro 最终无法提权成功。 | 3_15_e003, 3_15_e009 |
+| DEFENSE_EVASION | attempted | 防御规避 | 评论中明确写到尝试把 staged file 注入 sshd 进程内存，但最终失败。 | 3_15_e003 |
 
 #### Technique 判定
 
@@ -3794,6 +3809,7 @@
 | T1046 | confirmed | micro portscan/netrecon 对网络服务做侦察。 | 3_15_e001, 3_15_e012, 3_15_e014 |
 | T1057 | confirmed | ps/sshd PID 明确对应进程发现。 | 3_15_e006, 3_15_e007 |
 | T1070.004 | confirmed | rm /tmp/ztmp 是显式文件删除。 | 3_15_e013 |
+| T1055 | attempted | 评论中明确写到尝试把 staged file 注入 sshd 进程内存，但最终失败。 | 3_15_e003 |
 
 #### Behavior Chain
 
@@ -3803,6 +3819,7 @@
 | process_discovery | process_discovery | confirmed | Event Log 中有 ps 与 sshd PID。 | 3_15_e006, 3_15_e007 |
 | payload_write | payload_write | confirmed | 正文明确说把 drakon executable 写到磁盘，又写入 micro apt。 | 3_15_e001, 3_15_e003, 3_15_e008 |
 | payload_elevate | payload_elevate | attempted | Event Log 中出现 elevate ztmp，但正文明确说明 micro 无法完成提权。 | 3_15_e003, 3_15_e009 |
+| inject_attempt | inject_attempt | attempted | 评论中明确写到尝试把 staged file 注入 sshd 进程内存，但最终失败。 | 3_15_e003 |
 | payload_execute | payload_execute | confirmed | Event Log 中有 execfile，正文也写到 executed it from disk。 | 3_15_e003, 3_15_e010 |
 | c2_callback | c2_callback | confirmed | micro callback 明确形成了对外控制连接。 | 3_15_e001, 3_15_e011 |
 | network_scan | scan | confirmed | Event Log 中有 micro portscan 与 netrecon 8064。 | 3_15_e001, 3_15_e012, 3_15_e014 |
@@ -4065,8 +4082,8 @@
 - 时间窗：`2018-04-13T13:50:00` -> `2018-04-13T14:28:00`
 - Markdown 行号：`1655-1720`
 - 报告页：`40, 41`
-- 攻击概述：TRACE 上的第一封恶意 tcexec 附件邮件失败，第二封把 micro apt 伪装成 tcexec 后成功：用户打开邮件后 micro 自动执行并回连，随后进行端口扫描，shell 命令尝试失败。
-- 备注：窗口同时保留 first attachment failed 与 second micro succeeded 两段，但 confirmed tactics 只按成功的 micro 链判定。
+- 攻击概述：TRACE 上的第一封恶意 tcexec 附件邮件失败，第二封把 micro apt 伪装成 tcexec 后成功：用户打开邮件后 micro 自动执行并回连，随后进行端口扫描，shell 命令尝试失败；同时 pine backdoor 写出了 tcexfil 本地数据文件。
+- 备注：窗口同时保留 first attachment failed 与 second micro succeeded 两段；由于报告明确说明 tcexfil 用于写出 stolen e-mail data，因此 COLLECTION 也计入 confirmed。
 
 #### 战术判定
 
@@ -4076,6 +4093,7 @@
 | EXECUTION | confirmed | 执行 | micro apt 作为附件被自动执行为新进程。 | 4_9_e023, 4_9_e024, 4_9_e025, 4_9_e013 |
 | COMMAND_AND_CONTROL | confirmed | 命令控制 | Micro APT C2 连接被直接记录。 | 4_9_e001, 4_9_e013, 4_9_e019, 4_9_e026 |
 | DISCOVERY | confirmed | 侦察发现 | micro apt 对目标网络主机发起端口扫描。 | 4_9_e001, 4_9_e014 |
+| COLLECTION | confirmed | 数据收集 | 报告明确说明 pine backdoor 会把 stolen e-mail data 写到 tcexfil，而交互中记录了 tcexfil 文件已写出。 | 4_9_e024 |
 
 #### Technique 判定
 
@@ -4085,6 +4103,7 @@
 | T1204.002 | confirmed | 用户打开邮件后附件被执行。 | 4_9_e004, 4_9_e011, 4_9_e012, 4_9_e013 |
 | T1071.001 | confirmed | Micro APT listener/C2 通过 web 风格地址建立。 | 4_9_e001, 4_9_e013, 4_9_e019, 4_9_e026 |
 | T1046 | confirmed | portscan 明确对应网络服务侦察。 | 4_9_e001, 4_9_e014 |
+| T1005 | confirmed | tcexfil 的语义被正文明确说明为 stolen e-mail data 的本地落地文件。 | 4_9_e024 |
 
 #### Behavior Chain
 
@@ -4092,6 +4111,7 @@
 | --- | --- | --- | --- | --- |
 | phishing_attachment | attachment_open | confirmed | 两次邮件附件投递都在 Event Log 中有直接记录，第二次 micro-as-tcexec 成功形成自动执行链。 | 4_9_e004, 4_9_e011, 4_9_e012 |
 | payload_write | payload_write | confirmed | tcexec、tcexfil、Micro APT 文件都落到了磁盘。 | 4_9_e023, 4_9_e024, 4_9_e025 |
+| email_data_collect | file_collect | confirmed | 评论明确说明漏洞版 pine 会把 stolen e-mail data 写到 tcexfil，而交互中也确实出现了 tcexfil 落地。 | 4_9_e024 |
 | payload_execute | payload_execute | confirmed | 第二次邮件打开后 micro apt 自动执行成新进程。 | 4_9_e013 |
 | c2_callback | c2_callback | confirmed | Micro APT C2 与 eth0:951 TRACE micro 地址共同支撑控制连接。 | 4_9_e001, 4_9_e013, 4_9_e019, 4_9_e026 |
 | network_scan | scan | confirmed | Event Log 中有 micro apt portscan。 | 4_9_e001, 4_9_e014 |
