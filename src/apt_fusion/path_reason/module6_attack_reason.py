@@ -1772,6 +1772,242 @@ def _cadets_claim_backed_tactic_backfill(
     return list(dedup.values())
 
 
+def _generic_claim_backed_tactic_backfill(
+    cfg: FusionConfig,
+    dossier: dict[str, Any],
+    claims: list[dict[str, Any]],
+    attack_candidates: dict[str, Any],
+    mappings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not _tactics_only_enabled(cfg):
+        return mappings
+
+    candidate_tactic_ids = {
+        str(item.get("external_id", "")).strip().upper()
+        for item in attack_candidates.get("tactics", []) or []
+        if isinstance(item, dict) and str(item.get("external_id", "")).strip()
+    }
+    existing_tactic_ids = {
+        str(item.get("tactic_id", "")).strip().upper()
+        for item in mappings
+        if isinstance(item, dict) and str(item.get("tactic_id", "")).strip()
+    }
+    claim_ids_by_behavior: dict[str, list[str]] = {}
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        claim_id = str(claim.get("claim_id", "")).strip()
+        behavior = str(claim.get("behavior_type", "")).strip().lower()
+        if not claim_id or not behavior:
+            continue
+        claim_ids_by_behavior.setdefault(behavior, []).append(claim_id)
+
+    def _append_unique_mapping(
+        tactic_id: str,
+        evidence_claim_ids: list[str],
+        *,
+        confidence: float,
+        gap: str,
+    ) -> None:
+        if not evidence_claim_ids:
+            return
+        mappings.append(
+            {
+                "tactic_id": tactic_id,
+                "tactic": _TACTIC_NAME_BY_ID.get(tactic_id, ""),
+                "technique_id": "",
+                "technique": "",
+                "evidence_claim_ids": evidence_claim_ids,
+                "confidence": confidence,
+                "gaps": [gap],
+            }
+        )
+        existing_tactic_ids.add(tactic_id)
+
+    cleanup_behaviors = ("clear_logs", "sensitive_temp_rm", "untrusted_file_rm")
+    if "TA0005" in candidate_tactic_ids and "TA0005" not in existing_tactic_ids:
+        evidence_claim_ids: list[str] = []
+        for behavior in cleanup_behaviors:
+            for claim_id in claim_ids_by_behavior.get(behavior, []):
+                if claim_id not in evidence_claim_ids:
+                    evidence_claim_ids.append(claim_id)
+        if evidence_claim_ids:
+            _append_unique_mapping(
+                "TA0005",
+                evidence_claim_ids,
+                confidence=0.78,
+                gap="generic_cleanup_claim_backfill",
+            )
+
+    collection_execution_context_behaviors = (
+        "attachment_user_exec",
+        "make_file_exec",
+        "untrusted_file_exec",
+        "interpreter_precursor_chain",
+        "shell_exec",
+    )
+    if "TA0009" in candidate_tactic_ids and "TA0009" not in existing_tactic_ids:
+        sensitive_claim_ids = list(claim_ids_by_behavior.get("sensitive_read", []))
+        has_execution_context = any(
+            behavior in claim_ids_by_behavior
+            for behavior in collection_execution_context_behaviors
+        )
+        if sensitive_claim_ids and has_execution_context:
+            evidence_claim_ids = list(sensitive_claim_ids)
+            for behavior in collection_execution_context_behaviors:
+                for claim_id in claim_ids_by_behavior.get(behavior, []):
+                    if claim_id not in evidence_claim_ids:
+                        evidence_claim_ids.append(claim_id)
+            _append_unique_mapping(
+                "TA0009",
+                evidence_claim_ids,
+                confidence=0.76,
+                gap="generic_sensitive_read_collection_backfill",
+            )
+
+    if "TA0007" in candidate_tactic_ids and "TA0007" not in existing_tactic_ids:
+        family_tags = _dossier_family_tags(dossier)
+        cleanup_or_rm_behaviors = ("clear_logs", "sensitive_temp_rm", "untrusted_file_rm")
+        discovery_claim_ids = list(claim_ids_by_behavior.get("network_service_discovery", []))
+        if (
+            "cleanup_delete" in family_tags
+            and discovery_claim_ids
+            and "credential_submit" not in claim_ids_by_behavior
+            and any(behavior in claim_ids_by_behavior for behavior in cleanup_or_rm_behaviors)
+        ):
+            evidence_claim_ids = list(discovery_claim_ids)
+            for behavior in cleanup_or_rm_behaviors:
+                for claim_id in claim_ids_by_behavior.get(behavior, []):
+                    if claim_id not in evidence_claim_ids:
+                        evidence_claim_ids.append(claim_id)
+            _append_unique_mapping(
+                "TA0007",
+                evidence_claim_ids,
+                confidence=0.77,
+                gap="generic_cleanup_scandiscovery_backfill",
+            )
+
+    return mappings
+
+
+def _generic_claim_context_mapping_guard(
+    cfg: FusionConfig,
+    dossier: dict[str, Any],
+    claims: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not _tactics_only_enabled(cfg):
+        return mappings
+
+    family_tags = _dossier_family_tags(dossier)
+    is_mail_browser_context_tail = "mail_browser_context_tail" in family_tags
+
+    behaviors = {
+        str(claim.get("behavior_type", "")).strip().lower()
+        for claim in claims
+        if isinstance(claim, dict) and str(claim.get("behavior_type", "")).strip()
+    }
+    claim_behavior_by_id = {
+        str(claim.get("claim_id", "")).strip(): str(claim.get("behavior_type", "")).strip().lower()
+        for claim in claims
+        if isinstance(claim, dict)
+        and str(claim.get("claim_id", "")).strip()
+        and str(claim.get("behavior_type", "")).strip()
+    }
+
+    def _mapping_behaviors(mapping: dict[str, Any]) -> set[str]:
+        result: set[str] = set()
+        for claim_id in mapping.get("evidence_claim_ids", []) or []:
+            behavior = claim_behavior_by_id.get(str(claim_id).strip(), "")
+            if behavior:
+                result.add(behavior)
+        return result
+
+    guarded_mappings = list(mappings)
+    stronger_followup_behaviors = {
+        "shell_exec",
+        "interpreter_precursor_chain",
+        "cnc_communication",
+        "payload_elevate",
+        "sensitive_command",
+    }
+
+    if is_mail_browser_context_tail:
+        existing_tactic_ids = {
+            str(item.get("tactic_id", "")).strip().upper()
+            for item in guarded_mappings
+            if isinstance(item, dict) and str(item.get("tactic_id", "")).strip()
+        }
+        should_suppress_ta0007 = (
+            "TA0007" in existing_tactic_ids
+            and "credential_submit" in behaviors
+            and "network_service_discovery" in behaviors
+            and not behaviors.intersection(stronger_followup_behaviors)
+        )
+        if should_suppress_ta0007:
+            guarded_mappings = [
+                item
+                for item in guarded_mappings
+                if not (
+                    isinstance(item, dict)
+                    and str(item.get("tactic_id", "")).strip().upper() == "TA0007"
+                )
+            ]
+
+        # In phishing/mail-browser tails, a post-exec sensitive read often reflects
+        # collection against local files, not confirmed credential-access behavior.
+        guarded_mappings = [
+            item
+            for item in guarded_mappings
+            if not (
+                isinstance(item, dict)
+                and str(item.get("tactic_id", "")).strip().upper() == "TA0006"
+                and "credential_submit" not in _mapping_behaviors(item)
+                and _mapping_behaviors(item).issubset({"sensitive_read", "shell_exec"})
+            )
+        ]
+
+    # Privilege-escalation should stay anchored to explicit elevate/sudo/su evidence,
+    # otherwise generic shell execution in post-compromise tails overstates the tactic.
+    guarded_mappings = [
+        item
+        for item in guarded_mappings
+        if not (
+            isinstance(item, dict)
+            and str(item.get("tactic_id", "")).strip().upper() == "TA0004"
+            and not _mapping_behaviors(item).intersection({"payload_elevate", "sudo_exec", "switch_su"})
+        )
+    ]
+
+    existing_tactic_ids = {
+        str(item.get("tactic_id", "")).strip().upper()
+        for item in guarded_mappings
+        if isinstance(item, dict) and str(item.get("tactic_id", "")).strip()
+    }
+    if "TA0043" not in existing_tactic_ids:
+        return guarded_mappings
+
+    suppress_ta0043 = False
+    if "cleanup_delete" in family_tags:
+        suppress_ta0043 = True
+    else:
+        strong_post_compromise = {"cnc_communication", "shell_exec", "payload_elevate"}
+        privilege_or_precursor = {"interpreter_precursor_chain", "attachment_user_exec", "sensitive_command"}
+        if behaviors.intersection(strong_post_compromise) and behaviors.intersection(privilege_or_precursor):
+            suppress_ta0043 = True
+    if not suppress_ta0043:
+        return guarded_mappings
+
+    return [
+        item
+        for item in guarded_mappings
+        if not (
+            isinstance(item, dict)
+            and str(item.get("tactic_id", "")).strip().upper() == "TA0043"
+        )
+    ]
+
+
 def _synthetic_bundle_for_attack_kb(dossier: dict[str, Any]) -> dict[str, Any]:
     synthetic_events: list[dict[str, Any]] = []
     for item in dossier.get("evidence_timeline", []):
@@ -1956,7 +2192,9 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
                     claims,
                 )
                 mappings = _apply_behavior_prior_mappings(cfg, dossier, claims, attack_candidates, mappings)
+                mappings = _generic_claim_backed_tactic_backfill(cfg, dossier, claims, attack_candidates, mappings)
                 mappings = _cadets_claim_backed_tactic_backfill(cfg, dossier, claims, attack_candidates, mappings)
+                mappings = _generic_claim_context_mapping_guard(cfg, dossier, claims, mappings)
             report = {
                 "task_id": task_id,
                 "path_id": path_id,

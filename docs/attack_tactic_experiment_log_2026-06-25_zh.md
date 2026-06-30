@@ -1115,3 +1115,317 @@ artifact：
 1. 先把“窗口没有 GT 进程命中”与“窗口有对象命中但没有进程命中”分开处理。
 2. 对 CADETS 这类 `object-side only` 窗口，评估是否需要把对象证据更实质地接进链条，而不是继续只靠进程主线。
 3. 对 TRACE / THEIA 那些原始日志层面就没有 GT 命中的窗口，优先做 GT 对齐、报告对齐和日志可观察性复核，不应直接推进 claim 或 tactic mapping 修补。
+
+## 11. 2026-06-30 新增记录
+
+### 11.1 当前最新稳定基线
+
+截至 2026-06-30，当前新的稳定基线已经从 `step4m_windowcontinuation` 往后推进到 `step7b_privcred_guard`：
+
+- TRACE 稳定基线：
+  - `artifacts_trace_train_stats_latefusion_bonus1_microstep2b_truthgap_tactics_only_llm_worktree_step7b_privcred_guard_e3gt_plus240_gtonly_20260630`
+  - 指标：
+    - `confirmed_window_recall = 0.5`
+    - `strict_tactic_recall_macro = 0.5`
+    - `strict_tactic_precision_macro = 1.0`
+    - `off_window_high_risk_rate = 0.0`
+- THEIA 稳定基线：
+  - `artifacts_theia_train_stats_latefusion_llama31_microstep2b_module1_gtbase_tactics_only_llm_fanout_gt2_e3gt_windowgate_step7b_privcred_guard_offset240_20260630`
+  - 指标：
+    - `confirmed_window_recall = 0.6666666666666666`
+    - `strict_tactic_recall_macro = 0.6666666666666666`
+    - `strict_tactic_precision_macro = 1.0`
+    - `off_window_high_risk_rate = 0.04132231404958678`
+- CADETS 当前仍以 `step7b` 为稳定对照线：
+  - `artifacts_cadets_train_stats_latefusion_llama31_microstep2b_module1_gtbase_tactics_only_llm_fanout_gt2_e3gt_plus240_step7b_privcred_guard_20260630`
+  - 指标：
+    - `confirmed_window_recall = 0.5`
+    - `strict_tactic_recall_macro = 0.41666666666666663`
+    - `strict_tactic_precision_macro = 1.0`
+    - `off_window_high_risk_rate = 0.9375`
+
+### 11.2 `step6a_generic_cleanup_backfill_20260630`
+
+数据集：
+
+- TRACE
+- THEIA
+- CADETS
+
+修改内容：
+
+- 在 `module6_attack_reason.py` 增加非常窄的 `TA0005 / DEFENSE_EVASION` 报告级 backfill。
+- 只在当前 path 已经有 cleanup 类 claims 时，补一条战术映射。
+
+动机：
+
+- TRACE `20180413_1243_1253_04` 明显缺少 cleanup / defense-evasion 语义。
+
+实验效果：
+
+- TRACE 有收益。
+- THEIA、CADETS 基本不变。
+
+结论：
+
+- 成功，但属于局部增益补丁。
+- 是后续 `step6e` 和 `step7a/7b` 的基础。
+
+### 11.3 `step6d_browser_discovery_guard_20260630`
+
+数据集：
+
+- TRACE
+- THEIA
+- CADETS
+
+修改内容：
+
+- 在 mail/browser/phishing tail 场景下，如果只有 `credential_submit + network_service_discovery` 这类弱组合、且没有更强 follow-up 行为，就抑制 `TA0007 / DISCOVERY`。
+
+动机：
+
+- 压掉 THEIA 浏览器尾巴路径把弱凭证提交语义误抬成 discovery 的问题。
+
+实验效果：
+
+- THEIA `strict_tactic_precision_macro` 从 `0.875` 提升到 `1.0`。
+- TRACE、CADETS 不变。
+
+结论：
+
+- 成功。
+- 这是当前 THEIA 稳定基线中的关键映射层 guard。
+
+### 11.4 `step6e_cleanup_scandiscovery_backfill_20260630`
+
+数据集：
+
+- TRACE
+- THEIA
+- CADETS
+
+修改内容：
+
+- 对 `cleanup_delete + network_service_discovery + cleanup/remove claims` 这一组极窄条件，补 `TA0007 / DISCOVERY`。
+
+动机：
+
+- TRACE `20180413_1243_1253_04` 的 discovery 语义在 claim 层已有支撑，但最终战术没有稳定落下来。
+
+实验效果：
+
+- TRACE `strict_tactic_recall_macro` 从 `0.4` 提升到 `0.45`。
+- `TRACE_20180413_1243_1253_04` 达到全命中。
+- THEIA、CADETS 不变。
+
+结论：
+
+- 成功。
+- 说明 `cleanup/scan` 在 TRACE 这类窗口里更适合做窄 backfill，而不是放大成全局 discovery 规则。
+
+### 11.5 `step6g_recon_guard_fixed_20260630`
+
+数据集：
+
+- TRACE
+- THEIA
+- CADETS
+
+修改内容：
+
+- 修正 `TA0043 / RECONNAISSANCE` 抑制 guard 的作用域 bug。
+- 在明确 post-compromise / cleanup 上下文里，压掉泛化出来的 `RECONNAISSANCE`。
+
+动机：
+
+- TRACE `20180413_1350_1428_05` 存在多余的 `RECONNAISSANCE`。
+
+实验效果：
+
+- TRACE `strict_tactic_precision_macro` 从 `0.8333333333333333` 提升到 `0.9`。
+- TRACE 额外 `RECONNAISSANCE` 被去掉。
+- THEIA、CADETS 不变。
+
+结论：
+
+- 成功。
+- 这是 `step7a/step7b` 之前的最后一个稳定映射层修复。
+
+### 11.6 `step7a_pathscore_bonus_20260630`
+
+数据集：
+
+- TRACE
+- THEIA
+- CADETS
+
+修改内容：
+
+- 不改 claim / mapping 逻辑，只重排 `CandidatePath`：
+  - 已命中 `TA0009 / COLLECTION` 的 path 加较大 bonus
+  - 已命中 `TA0005 / DEFENSE_EVASION` 的 path 加较小 bonus
+
+动机：
+
+- TRACE `task_0557_path_005` 已经产出了 `COLLECTION`，但 rank 太靠后，进不了窗口 top-5。
+- THEIA `20180410_1341_1455_01` 已有多条带 `DEFENSE_EVASION` 的 path，但也都排在 top-5 外。
+
+实验效果：
+
+- TRACE：
+  - `strict_tactic_recall_macro = 0.5`
+  - 但多出 `CREDENTIAL_ACCESS` 和 `PRIVILEGE_ESCALATION`
+- THEIA：
+  - `strict_tactic_recall_macro = 0.6666666666666666`
+  - `THEIA_20180410_1341_1455_01` 补回 `DEFENSE_EVASION`
+- CADETS：
+  - 无增益
+
+结论：
+
+- 部分成功。
+- 它证明“path 排序”确实能解决 TRACE `COLLECTION` 和 THEIA `DEFENSE_EVASION` 的 top-5 问题。
+- 但 TRACE 同时引入了两个新的额外战术，因此不能直接作为最终稳定基线。
+
+### 11.7 `step7b_privcred_guard_20260630`
+
+数据集：
+
+- TRACE
+- THEIA
+- CADETS
+
+修改内容：
+
+- 在 `module6_attack_reason.py` 的 `_generic_claim_context_mapping_guard(...)` 里新增两条更窄的校验：
+  - `TA0006 / CREDENTIAL_ACCESS`
+    - 仅当 mail/browser tail 中不只是 `sensitive_read + shell_exec` 这种弱组合时才保留
+  - `TA0004 / PRIVILEGE_ESCALATION`
+    - 只允许由 `payload_elevate / sudo_exec / switch_su` 这类强提权 claim 支撑
+    - 不再允许纯 `shell_exec` 抬出提权
+
+动机：
+
+- `step7a` 虽然补回了 TRACE `COLLECTION`，但同时把：
+  - `task_0557_path_005` 抬出了额外 `CREDENTIAL_ACCESS`
+  - `task_0558_path_002` 抬出了额外 `PRIVILEGE_ESCALATION`
+
+实验效果：
+
+- TRACE：
+  - 保住了 `COLLECTION`
+  - 同时压掉了多余的 `CREDENTIAL_ACCESS` 和 `PRIVILEGE_ESCALATION`
+  - 指标达到：
+    - `confirmed_window_recall = 0.5`
+    - `strict_tactic_recall_macro = 0.5`
+    - `strict_tactic_precision_macro = 1.0`
+    - `off_window_high_risk_rate = 0.0`
+- THEIA：
+  - 保持 `step7a` 的收益不变
+  - `THEIA_20180410_1341_1455_01` 继续保有 `DEFENSE_EVASION`
+- CADETS：
+  - 不受影响
+
+结论：
+
+- 明确成功。
+- 这是 2026-06-30 后三个数据集共享的最新稳定映射层基线。
+
+### 11.8 CADETS 前两个空窗的新上游结论
+
+本轮重新解压了 CADETS 原始日志，并按 enriched GT + `+240` 重做了前两个 confirmed 窗口的原始日志核对：
+
+- `CADETS_20180406_1121_1208_01`
+- `CADETS_20180411_1508_1515_02`
+
+新的明确事实：
+
+- 两个窗口里：
+  - `subject/process hit = 0`
+  - `object-side hit = 8`
+- 这 8 个命中 UUID 都是 `FileObject`
+- 高频事件集中在：
+  - `EVENT_MMAP`
+  - `EVENT_OPEN`
+  - `EVENT_CLOSE`
+  - `EVENT_READ`
+  - 少量 `EVENT_EXECUTE`
+
+这说明：
+
+- 这两个窗口不是“完全没有 GT 命中”
+- 但它们的命中高度偏向对象侧，而不是活跃恶意进程侧
+- 因而用“GT-positive 进程 task -> 证据图 -> 候选链 -> 战术”的主线去覆盖它们，本身就天然吃亏
+
+### 11.9 `step8a_objecthit_taskunion_20260630`
+
+数据集：
+
+- CADETS
+
+修改内容：
+
+- 这是一个独立上游实验 runner，不改主代码语义。
+- 做法是：
+  - 保留原来的 `module1_ground_truth_positive_base_only` 进程 GT-positive task
+  - 额外并入一批“confirmed 窗口内 GT 对象命中很强、且 task 规模不太大”的 object-hit tasks
+  - 然后从 `module3 -> module6 -> eval` 整条后半段重跑
+- 本轮使用的 object-hit 选择阈值：
+  - `event_count >= 100`
+  - `distinct_gt_objects >= 5`
+  - `task_size <= 5000`
+
+动机：
+
+- 既然前两个 CADETS 空窗的 GT 命中主要落在对象侧，就尝试把“触碰这些 GT 对象的 task”也送进后半段，看能否拉起窗口战术输出。
+
+实验效果：
+
+- 指标完全没有改善：
+  - `confirmed_window_recall = 0.5`
+  - `strict_tactic_recall_macro = 0.41666666666666663`
+  - `strict_tactic_precision_macro = 1.0`
+  - `off_window_high_risk_rate = 0.9375`
+- `CADETS_20180406_1121_1208_01` 和 `CADETS_20180411_1508_1515_02` 仍然是：
+  - `Pred = []`
+  - `Missed = all`
+- 进一步检查 `path_assignment.json` 后发现：
+  - 这两个窗口依然 `matches = 0`
+  - 也就是说，并入 object-hit task 后，最终仍没有形成能落进窗口的 path assignment
+
+失败原因：
+
+- 这说明“仅仅把 object-hit task 并进来”还不够。
+- 问题不只是 task 是否被选进后半段，还包括：
+  - 这些 object-hit tasks 本身是否太大、太泛
+  - 这些对象侧事件如何进入 `module3` 的 frontier / 证据恢复
+  - 这些对象侧证据能否在 `module5` 真正形成带时间落点的候选链
+
+结论：
+
+- 明确失败。
+- 产物已按失败方案标记为：
+  - `artifacts_cadets_..._failed_step8a_objecthit_taskunion_no_gain_20260630`
+- 这条线说明：
+  - 下一步如果还想处理 CADETS 前两个空窗，不能只做“对象命中 task 直筛”
+  - 更可能需要更深一层的“对象侧证据如何进入链条”的设计，而不是只改 task 选择名单
+
+### 11.10 当前阶段的总判断
+
+到 2026-06-30 这一步，可以把后半段优化方向先收敛成两类：
+
+1. TRACE / THEIA
+   - 主要收益已经来自：
+     - `browser credential guard`
+     - `cleanup/scandiscovery backfill`
+     - `pathscore bonus`
+     - `privilege/credential mapping guard`
+   - 当前最值得保留的是 `step7b` 稳定线。
+2. CADETS
+   - 当前主要瓶颈已经不再是简单的 claim 或 tactic mapping
+   - 而是更上游的：
+     - `GT 对象侧命中如何进入任务/证据/链条`
+     - `对象侧证据如何形成窗口内可分配的 path`
+
+因此后续再继续优化时，应优先把 CADETS 视为“对象侧进入链条”的问题，而不是继续在现有 `step7b` 的映射层上微调。
