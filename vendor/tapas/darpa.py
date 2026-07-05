@@ -1,3 +1,4 @@
+import copy
 import os, json, traceback, sys, re, gc
 sys.dont_write_bytecode = True
 import collections
@@ -16,6 +17,107 @@ from tqdm import tqdm
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+
+def _subject_properties_map(subject_data):
+    properties = subject_data.get("properties")
+    if not isinstance(properties, dict):
+        return {}
+    mapping = properties.get("map")
+    if not isinstance(mapping, dict):
+        return {}
+    return mapping
+
+
+def _subject_parent_uuid(subject_data):
+    parent_ref = subject_data.get("parentSubject")
+    if isinstance(parent_ref, dict):
+        value = parent_ref.get("com.bbn.tc.schema.avro.cdm18.UUID")
+        if value:
+            return str(value)
+    return "Unknow"
+
+
+def _subject_tgid(subject_data):
+    props = _subject_properties_map(subject_data)
+    value = props.get("tgid")
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _resolve_thread_subject_owners(subject_rows):
+    subject_info = {
+        str(row["uuid"]): dict(row)
+        for row in subject_rows
+        if isinstance(row, dict) and str(row.get("uuid", "")).strip()
+    }
+    owner_cache = {}
+
+    def resolve_owner(subject_uuid, trail=None):
+        subject_uuid = str(subject_uuid)
+        if subject_uuid in owner_cache:
+            return owner_cache[subject_uuid]
+        if subject_uuid not in subject_info:
+            owner_cache[subject_uuid] = subject_uuid
+            return subject_uuid
+        if trail is None:
+            trail = set()
+        if subject_uuid in trail:
+            owner_cache[subject_uuid] = subject_uuid
+            return subject_uuid
+        trail.add(subject_uuid)
+        row = subject_info[subject_uuid]
+        owner = subject_uuid
+        parent_uuid = str(row.get("parentuuid", "Unknow"))
+        subject_tgid = str(row.get("tgid", "")).strip()
+        if parent_uuid in subject_info:
+            parent_tgid = str(subject_info[parent_uuid].get("tgid", "")).strip()
+            if subject_tgid and parent_tgid and subject_tgid == parent_tgid:
+                owner = resolve_owner(parent_uuid, trail)
+        trail.remove(subject_uuid)
+        owner_cache[subject_uuid] = owner
+        return owner
+
+    owner_by_uuid = {
+        subject_uuid: resolve_owner(subject_uuid)
+        for subject_uuid in subject_info
+    }
+    process_parent_by_owner = {}
+    for subject_uuid, row in subject_info.items():
+        owner_uuid = owner_by_uuid[subject_uuid]
+        if owner_uuid != subject_uuid:
+            continue
+        current_tgid = str(row.get("tgid", "")).strip()
+        parent_uuid = str(row.get("parentuuid", "Unknow"))
+        visited = {subject_uuid}
+        resolved_parent = "Unknow"
+        while parent_uuid in subject_info and parent_uuid not in visited:
+            visited.add(parent_uuid)
+            parent_row = subject_info[parent_uuid]
+            parent_tgid = str(parent_row.get("tgid", "")).strip()
+            if current_tgid and parent_tgid and current_tgid == parent_tgid:
+                parent_uuid = str(parent_row.get("parentuuid", "Unknow"))
+                continue
+            resolved_parent = owner_by_uuid.get(parent_uuid, parent_uuid)
+            break
+        process_parent_by_owner[owner_uuid] = resolved_parent
+    return owner_by_uuid, process_parent_by_owner
+
+
+def _remap_event_subjects(event_count, raw_to_canonical):
+    remapped = {}
+    for key, count in event_count.items():
+        if not isinstance(key, tuple) or len(key) != 3:
+            continue
+        event_type, subject_id, object_id = key
+        canonical_subject = raw_to_canonical.get(str(subject_id), str(subject_id))
+        remapped_key = (event_type, canonical_subject, object_id)
+        if remapped_key in remapped:
+            remapped[remapped_key] += count
+        else:
+            remapped[remapped_key] = count
+    return remapped
+
 def parser_cadets(data_path):
     data_list = os.listdir(data_path)
     event_map = {'EVENT_ACCEPT': 1, 'EVENT_CONNECT': 2, 'EVENT_EXECUTE': 3, 'EVENT_EXIT': 4, 'EVENT_READ': 5,
@@ -24,6 +126,7 @@ def parser_cadets(data_path):
     object_list = []
     event_count = {}
     file_path = {}
+    subject_rows = []
 
     for file in tqdm(data_list, desc=f"Parsing", unit="file"):
         f = open(data_path + file, 'r')
@@ -62,9 +165,16 @@ def parser_cadets(data_path):
                 elif "com.bbn.tc.schema.avro.cdm18.Subject" in event["datum"]:
                     data = event["datum"]["com.bbn.tc.schema.avro.cdm18.Subject"]
                     uuid = data["uuid"]
-                    parentuuid = data['parentSubject']['com.bbn.tc.schema.avro.cdm18.UUID'] if data['parentSubject'] is not None else 'Unknow'
+                    parentuuid = _subject_parent_uuid(data)
                     pid = str(data["cid"])
-                    subject_list.append(['1', uuid, parentuuid, pid])
+                    subject_rows.append(
+                        {
+                            "uuid": str(uuid),
+                            "parentuuid": str(parentuuid),
+                            "process_id": pid,
+                            "tgid": _subject_tgid(data),
+                        }
+                    )
                 elif "com.bbn.tc.schema.avro.cdm18.FileObject" in event["datum"]:
                     data = event["datum"]["com.bbn.tc.schema.avro.cdm18.FileObject"]
                     uuid = data["uuid"]
@@ -79,8 +189,31 @@ def parser_cadets(data_path):
     for i in range(len(object_list)):
         if object_list[i][0] == '2':
             object_list[i].append(file_path[object_list[i][1]] if object_list[i][1] in file_path else 'Unknow')
-
-    return subject_list, object_list, event_count
+    owner_by_uuid, process_parent_by_owner = _resolve_thread_subject_owners(subject_rows)
+    canonical_subject_list = []
+    seen_subjects = set()
+    for row in subject_rows:
+        owner_uuid = owner_by_uuid.get(row["uuid"], row["uuid"])
+        if owner_uuid != row["uuid"] or owner_uuid in seen_subjects:
+            continue
+        parent_uuid = process_parent_by_owner.get(owner_uuid, "Unknow")
+        if parent_uuid == owner_uuid:
+            parent_uuid = "Unknow"
+        canonical_subject_list.append(['1', owner_uuid, parent_uuid, row["process_id"]])
+        seen_subjects.add(owner_uuid)
+    event_count = _remap_event_subjects(
+        event_count,
+        {raw_uuid: owner_by_uuid.get(raw_uuid, raw_uuid) for raw_uuid in owner_by_uuid},
+    )
+    metadata = {
+        "raw_subject_to_canonical_node": {
+            raw_uuid: owner_by_uuid.get(raw_uuid, raw_uuid)
+            for raw_uuid in owner_by_uuid
+        },
+        "thread_subject_count": int(sum(1 for raw_uuid, owner_uuid in owner_by_uuid.items() if raw_uuid != owner_uuid)),
+        "process_subject_count": int(len(canonical_subject_list)),
+    }
+    return canonical_subject_list, object_list, event_count, metadata
 
 
 def parser_fivedirections(data_path):
@@ -92,6 +225,7 @@ def parser_fivedirections(data_path):
     event_count = {}
 
     file_path = {}
+    subject_rows = []
 
     for file in tqdm(data_list, desc=f"Parsing", unit="file"):
         f = open(data_path + file, 'r', encoding='utf-8')
@@ -129,10 +263,16 @@ def parser_fivedirections(data_path):
                 elif "com.bbn.tc.schema.avro.cdm18.Subject" in event["datum"]:
                     data = event["datum"]["com.bbn.tc.schema.avro.cdm18.Subject"]
                     uuid = data["uuid"]
-                    parentuuid = data['parentSubject']['com.bbn.tc.schema.avro.cdm18.UUID'] if data[
-                                                                                                   'parentSubject'] is not None else 'Unknow'
+                    parentuuid = _subject_parent_uuid(data)
                     pid = str(data["cid"])
-                    subject_list.append(['1', uuid, parentuuid, pid])
+                    subject_rows.append(
+                        {
+                            "uuid": str(uuid),
+                            "parentuuid": str(parentuuid),
+                            "process_id": pid,
+                            "tgid": _subject_tgid(data),
+                        }
+                    )
                 elif "com.bbn.tc.schema.avro.cdm18.FileObject" in event["datum"]:
                     data = event["datum"]["com.bbn.tc.schema.avro.cdm18.FileObject"]
                     uuid = data["uuid"]
@@ -146,8 +286,31 @@ def parser_fivedirections(data_path):
     for i in range(len(object_list)):
         if object_list[i][0] == '2':
             object_list[i].append(file_path[object_list[i][1]] if object_list[i][1] in file_path else 'Unknow')
-
-    return subject_list, object_list, event_count
+    owner_by_uuid, process_parent_by_owner = _resolve_thread_subject_owners(subject_rows)
+    canonical_subject_list = []
+    seen_subjects = set()
+    for row in subject_rows:
+        owner_uuid = owner_by_uuid.get(row["uuid"], row["uuid"])
+        if owner_uuid != row["uuid"] or owner_uuid in seen_subjects:
+            continue
+        parent_uuid = process_parent_by_owner.get(owner_uuid, "Unknow")
+        if parent_uuid == owner_uuid:
+            parent_uuid = "Unknow"
+        canonical_subject_list.append(['1', owner_uuid, parent_uuid, row["process_id"]])
+        seen_subjects.add(owner_uuid)
+    event_count = _remap_event_subjects(
+        event_count,
+        {raw_uuid: owner_by_uuid.get(raw_uuid, raw_uuid) for raw_uuid in owner_by_uuid},
+    )
+    metadata = {
+        "raw_subject_to_canonical_node": {
+            raw_uuid: owner_by_uuid.get(raw_uuid, raw_uuid)
+            for raw_uuid in owner_by_uuid
+        },
+        "thread_subject_count": int(sum(1 for raw_uuid, owner_uuid in owner_by_uuid.items() if raw_uuid != owner_uuid)),
+        "process_subject_count": int(len(canonical_subject_list)),
+    }
+    return canonical_subject_list, object_list, event_count, metadata
 
 def parser_trace(data_path):
     data_list=sorted(os.listdir(data_path))
@@ -156,7 +319,6 @@ def parser_trace(data_path):
     subject_list=[]
     object_list=[]
     event_count={}
-    cid_map={}
     subject_rows=[]
     for file in tqdm(data_list, desc=f"Parsing", unit="file"):
         f=open(data_path+file,'r')
@@ -165,7 +327,12 @@ def parser_trace(data_path):
                 event=json.loads(line)
                 if "com.bbn.tc.schema.avro.cdm18.Event" in event["datum"]:
                     data=event["datum"]["com.bbn.tc.schema.avro.cdm18.Event"]
-                    subId=str(data["threadId"]["int"])
+                    subject_ref = data.get("subject", {})
+                    if not isinstance(subject_ref, dict):
+                        continue
+                    subId = str(subject_ref.get("com.bbn.tc.schema.avro.cdm18.UUID", "")).strip()
+                    if not subId:
+                        continue
                     objId=data["predicateObject"]["com.bbn.tc.schema.avro.cdm18.UUID"]
                     type=data["type"]
                     if type not in event_map:
@@ -187,12 +354,20 @@ def parser_trace(data_path):
                 elif "com.bbn.tc.schema.avro.cdm18.Subject" in event["datum"]:
                     data=event["datum"]["com.bbn.tc.schema.avro.cdm18.Subject"]
                     uuid=data["uuid"]
-                    parentuuid = data['parentSubject']['com.bbn.tc.schema.avro.cdm18.UUID'] if data['parentSubject'] is not None  else 'Unknow'
+                    parentuuid = _subject_parent_uuid(data)
                     cid=str(data["cid"])
-                    path=data["properties"]["map"]["cwd"] if "cwd" in data["properties"]["map"] else ''
-                    name=data["properties"]["map"]["name"]
-                    cid_map[uuid]=cid
-                    subject_rows.append([uuid,parentuuid,cid,path+'/'+name])
+                    props = _subject_properties_map(data)
+                    path=props["cwd"] if "cwd" in props else ''
+                    name=props.get("name", "")
+                    subject_rows.append(
+                        {
+                            "uuid": str(uuid),
+                            "parentuuid": str(parentuuid),
+                            "process_id": cid,
+                            "tgid": _subject_tgid(data),
+                            "name": path + '/' + name,
+                        }
+                    )
                 elif "com.bbn.tc.schema.avro.cdm18.FileObject" in event["datum"]:
                     data=event["datum"]["com.bbn.tc.schema.avro.cdm18.FileObject"]
                     uuid=data["uuid"]
@@ -204,10 +379,40 @@ def parser_trace(data_path):
                 traceback.print_exc()
                 print(line)
         f.close()
-    for uuid,parentuuid,cid,name in subject_rows:
-        parentcid=cid_map[parentuuid] if parentuuid in cid_map else 'Unknow'
-        subject_list.append(['1',cid,parentcid,cid,name])
-    return subject_list,object_list,event_count
+    owner_by_uuid, process_parent_by_owner = _resolve_thread_subject_owners(subject_rows)
+    owner_process_id = {}
+    owner_name = {}
+    for row in subject_rows:
+        owner_uuid = owner_by_uuid.get(row["uuid"], row["uuid"])
+        if owner_uuid != row["uuid"]:
+            continue
+        owner_process_id[owner_uuid] = str(row["process_id"])
+        owner_name[owner_uuid] = str(row.get("name", ""))
+
+    raw_to_canonical = {
+        raw_uuid: owner_process_id.get(owner_by_uuid.get(raw_uuid, raw_uuid), str(raw_uuid))
+        for raw_uuid in owner_by_uuid
+    }
+    event_count = _remap_event_subjects(event_count, raw_to_canonical)
+
+    seen_subjects = set()
+    for row in subject_rows:
+        owner_uuid = owner_by_uuid.get(row["uuid"], row["uuid"])
+        if owner_uuid != row["uuid"] or owner_uuid in seen_subjects:
+            continue
+        node_id = owner_process_id.get(owner_uuid, str(row["process_id"]))
+        parent_owner_uuid = process_parent_by_owner.get(owner_uuid, "Unknow")
+        parent_node_id = owner_process_id.get(parent_owner_uuid, "Unknow") if parent_owner_uuid != "Unknow" else "Unknow"
+        if parent_node_id == node_id:
+            parent_node_id = "Unknow"
+        subject_list.append(['1',node_id,parent_node_id,node_id,owner_name.get(owner_uuid, str(row.get("name", "")))])
+        seen_subjects.add(owner_uuid)
+    metadata = {
+        "raw_subject_to_canonical_node": raw_to_canonical,
+        "thread_subject_count": int(sum(1 for raw_uuid, owner_uuid in owner_by_uuid.items() if raw_uuid != owner_uuid)),
+        "process_subject_count": int(len(subject_list)),
+    }
+    return subject_list,object_list,event_count,metadata
 
 def compare_address(add1, add2):
     a = 0
@@ -559,6 +764,7 @@ def filters(
                                         padict[parentuuid].append(subjectuuid)
                                     else:
                                         padict[parentuuid] = [subjectuuid]
+                                    chdict[subjectuuid] = parentuuid
                         else:
                             chdict[subjectuuid] = parentuuid
                             if parentuuid in padict:
@@ -697,15 +903,18 @@ def filters(
     del objvec
     gc.collect()
 
-    for key, value in padict.items():
-        for xvalue in value:
-            if xvalue in padict.keys():
-                padict[key].remove(xvalue)
+    for key in list(padict.keys()):
+        filtered_children = []
+        for xvalue in padict[key]:
+            if xvalue in padict:
+                continue
+            filtered_children.append(xvalue)
+        padict[key] = filtered_children
     chi_pa = []
     for key, value in padict.items():
         for var in value:
             if var != 'Unknow':
-                chi_pa.append([str(var), str(key)])
+                chi_pa.append([str(key), str(var)])
 
     LSTMmodel = LSTM(6, 256, 6)
     LSTMmodel.load_state_dict(torch.load('./model/stackedlstm_tc.pt'))
@@ -921,8 +1130,8 @@ def _build_task_components(padict, chdict, segmented, split_mode="fanout"):
                     edge_key = tuple(sorted((node, neigh)))
                     if edge_key not in edge_seen:
                         edge_seen.add(edge_key)
-                        child, parent = (neigh, node) if chdict.get(neigh) == node else (node, neigh)
-                        edge_order.append([child, parent])
+                        parent, child = (node, neigh) if chdict.get(neigh) == node else (neigh, node)
+                        edge_order.append([parent, child])
                     if neigh in visited:
                         continue
                     visited.add(neigh)
@@ -971,10 +1180,10 @@ def _build_task_components(padict, chdict, segmented, split_mode="fanout"):
                 if child not in visited_nodes:
                     visited_nodes.add(child)
                     node_order.append(child)
-                edge = (child, node)
+                edge = (node, child)
                 if edge not in edge_seen:
                     edge_seen.add(edge)
-                    edge_order.append([child, node])
+                    edge_order.append([node, child])
                 if child in segmented:
                     continue
                 dfs(child)
@@ -1108,7 +1317,7 @@ def get_node_vec(subjhistory):
     return subjhisvec
 
 
-def decompose(edgeList, nodeVec, onedataname):
+def decompose(edgeList, nodeVec, onedataname, canonical_ground_truth=None):
     if isinstance(edgeList, dict) and 'task_components' in edgeList:
         return _decompose_task_components(edgeList['task_components'], nodeVec, onedataname)
     if isinstance(nodeVec, list):
@@ -1157,9 +1366,12 @@ def decompose(edgeList, nodeVec, onedataname):
         graphList.append([node_map[key], edge_map[key]])
 
     attackNode = set()
-    f = open('./groundtruth/{}.txt'.format(onedataname), 'r')
-    for line in f:
-        attackNode.add(line.strip())
+    if canonical_ground_truth is None:
+        f = open('./groundtruth/{}.txt'.format(onedataname), 'r')
+        for line in f:
+            attackNode.add(line.strip())
+    else:
+        attackNode = {str(item).strip() for item in canonical_ground_truth if str(item).strip()}
 
     data = []
     attack_graph = 0
@@ -1312,7 +1524,7 @@ def dataenhance(x, addnum, onedataname):
         #vec = newnodevec[0]
         #vec = torch.Tensor.tolist(vec[0])
         vec = torch.Tensor.tolist(newnodevec)
-        newx = x
+        newx = copy.deepcopy(x)
         newx[randomnode] = vec
         addx.append(newx)
     return addx
@@ -1329,25 +1541,26 @@ def data_deal(data_list, onedataname, divisor=2000, bonus=0):
             else:
                 needadd = max(0, (count // divisor) + bonus)
             atttack_num += needadd
-            data_pro.append(x)
+            data_pro.append(copy.deepcopy(x))
             addx = dataenhance(x['nodes'], needadd, onedataname)
             for a in addx:
-                data = x
+                data = copy.deepcopy(x)
                 data['nodes'] = a
                 data_pro.append(data)
         else:
-            data_pro.append(x)
+            data_pro.append(copy.deepcopy(x))
     print(f'Total Task:{len(data_pro)}\t Attack Tasks:{atttack_num}')
     return data_pro
 
 
 class GraphSAGE(torch.nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout_p=0.0):
         super(GraphSAGE, self).__init__()
         self.conv1 = SAGEConv(input_dim, hidden_dim)
         self.conv2 = SAGEConv(hidden_dim, hidden_dim)
         # self.conv3 = SAGEConv(hidden_dim, hidden_dim)
         self.lin = Linear(hidden_dim, output_dim)
+        self.dropout_p = float(dropout_p)
 
     def forward(self, x, edge_index, batch):
         x = self.conv1(x, edge_index)
@@ -1355,9 +1568,10 @@ class GraphSAGE(torch.nn.Module):
         x = self.conv2(x, edge_index)
         x = F.relu(x)
         embedding = global_max_pool(x, batch)
-        x = F.dropout(x, p=0.5, training=self.training)
-        x = self.lin(embedding)
-        return embedding, x
+        if self.dropout_p > 0.0:
+            embedding = F.dropout(embedding, p=self.dropout_p, training=self.training)
+        logits = self.lin(embedding)
+        return embedding, logits
 
 
 class MyOwnDataset(InMemoryDataset):
@@ -1423,38 +1637,59 @@ def eval(model, data_loder, flag):
     print(f"[{flag}]: Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1:.4f}")
 
 
-def train(params, onedataname):
-    torch.manual_seed(2025)
+def train(
+    params,
+    onedataname,
+    *,
+    class_weight_w0=1.0,
+    class_weight_w1=2.0,
+    dropout_p=0.0,
+    seed=2025,
+    train_eval_split=True,
+):
+    torch.manual_seed(int(seed))
+    np.random.seed(int(seed))
+    random.seed(int(seed))
     lr, epoch, batchSize = params
     data = torch.load('./data/{}/data.pt'.format(onedataname))
     dataset = MyOwnDataset(data)
     dataset = dataset.shuffle()
-    index = int(0.8 * len(dataset))
-    train_data = dataset[0:index]
-    test_data = dataset[index:]
+    if train_eval_split:
+        index = int(0.8 * len(dataset))
+        train_data = dataset[0:index]
+        test_data = dataset[index:]
+    else:
+        train_data = dataset
+        test_data = None
     train_loader = DataLoader(train_data, batch_size=batchSize, shuffle=True)
-    test_loader = DataLoader(test_data, batch_size=batchSize, shuffle=False)
-    model = GraphSAGE(input_dim=dataset.num_features, hidden_dim=64, output_dim=dataset.num_classes)
+    test_loader = DataLoader(test_data, batch_size=batchSize, shuffle=False) if test_data is not None and len(test_data) > 0 else None
+    model = GraphSAGE(
+        input_dim=dataset.num_features,
+        hidden_dim=64,
+        output_dim=dataset.num_classes,
+        dropout_p=dropout_p,
+    )
     print(model)
     model.to(device)
     optimizer = Adam(model.parameters(), lr=lr, weight_decay=5e-4)
-    weight = torch.tensor([0.75, 0.25]).to(device)
-    criterion = torch.nn.CrossEntropyLoss()
+    weight = torch.tensor([float(class_weight_w0), float(class_weight_w1)], dtype=torch.float32).to(device)
+    criterion = torch.nn.CrossEntropyLoss(weight=weight)
 
     for e in range(epoch):
-        optimizer.zero_grad()
-        total_loss = 0
+        total_loss = 0.0
         model.train()
         for data in train_loader:
-            data.to(device)
+            data = data.to(device)
+            optimizer.zero_grad()
             _, out = model(data.x, data.edge_index, data.batch)
             loss = criterion(out, data.y)
-            total_loss += loss
-        total_loss.backward()
-        optimizer.step()
+            loss.backward()
+            optimizer.step()
+            total_loss += float(loss.detach().item())
         print(f"\nEpoch {e + 1}/{epoch}, Loss: {total_loss:.4f}")
         eval(model, train_loader, 'Train')
-        eval(model, test_loader, 'Test ')
+        if test_loader is not None:
+            eval(model, test_loader, 'Test ')
 
     torch.save(model, './model/{}.pkl'.format(onedataname))
 
@@ -1503,13 +1738,13 @@ if __name__ == "__main__":
     for dataname in dataset:
         data_path = './data/{}/logs/'.format(dataname)
         if dataname == 'cadets':
-            subject_list, object_list, event_count = parser_cadets(data_path)
+            subject_list, object_list, event_count, _ = parser_cadets(data_path)
             subjectnode = encode_cadets(subject_list, object_list, event_count)
             chi_pa = cut_task(subject_list)
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             subvec = get_node_vec(subjectnode)
         elif dataname == 'fivedirections':
-            subject_list, object_list, event_count = parser_fivedirections(data_path)
+            subject_list, object_list, event_count, _ = parser_fivedirections(data_path)
             subjectnode = encode_fivedirections(subject_list, object_list, event_count)
             chi_pa = cut_task(subject_list)
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1517,7 +1752,7 @@ if __name__ == "__main__":
         elif dataname == 'theia':
             chi_pa, subvec = filters(data_path)
         else:
-            subject_list, object_list, event_count = parser_trace(data_path)
+            subject_list, object_list, event_count, _ = parser_trace(data_path)
             subjectnode = encode_trace(subject_list, object_list, event_count)
             chi_pa = cut_task(subject_list)
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

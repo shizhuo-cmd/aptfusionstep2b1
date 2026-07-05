@@ -84,7 +84,7 @@ def _task_root_leaf_ids(
     process_ids: list[str],
     local_edges: list[dict[str, str]],
 ) -> tuple[list[str], list[str], dict[str, int], dict[str, int], dict[str, set[str]]]:
-    # TAPAS task edges are exported as child -> parent.
+    # TAPAS task edges are exported as parent -> child.
     indegree = {pid: 0 for pid in process_ids}
     outdegree = {pid: 0 for pid in process_ids}
     neighbors = {pid: set() for pid in process_ids}
@@ -97,10 +97,10 @@ def _task_root_leaf_ids(
         neighbors.setdefault(src, set()).add(dst)
         neighbors.setdefault(dst, set()).add(src)
 
-    # With child -> parent edges, a task root has no outgoing parent edge.
-    root_process_ids = sorted([pid for pid in process_ids if outdegree.get(pid, 0) == 0])
-    # Leaves have no incoming child edges.
-    leaf_process_ids = sorted([pid for pid in process_ids if indegree.get(pid, 0) == 0])
+    # With parent -> child edges, a task root has no incoming parent edge.
+    root_process_ids = sorted([pid for pid in process_ids if indegree.get(pid, 0) == 0])
+    # Leaves have no outgoing child edges.
+    leaf_process_ids = sorted([pid for pid in process_ids if outdegree.get(pid, 0) == 0])
     return root_process_ids, leaf_process_ids, indegree, outdegree, neighbors
 
 

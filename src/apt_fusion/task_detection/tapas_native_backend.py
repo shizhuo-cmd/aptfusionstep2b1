@@ -19,6 +19,7 @@ import pandas as pd
 import torch
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import accuracy_score, average_precision_score, precision_recall_fscore_support, roc_auc_score
+from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.utils.class_weight import compute_sample_weight
 from torch_geometric.loader import DataLoader
 
@@ -253,18 +254,18 @@ def _build_segmentation_frame(edge_list: Sequence[Sequence[Any]]) -> pd.DataFram
     for edge in edge_list:
         if len(edge) < 2:
             continue
-        child = str(edge[0]).strip()
-        parent = str(edge[1]).strip()
+        parent = str(edge[0]).strip()
+        child = str(edge[1]).strip()
         if not child or not parent:
             continue
-        key = (child, parent)
+        key = (parent, child)
         if key in seen:
             continue
         seen.add(key)
         rows.append(
             {
-                "child_process_id": child,
                 "parent_process_id": parent,
+                "child_process_id": child,
                 "relation_type": "parent_to_child",
                 "use_for_segmentation": True,
             }
@@ -682,6 +683,26 @@ def _decompose_tc3_metadata(
         )
         task_index += 1
     return data
+
+
+def _canonicalize_ground_truth_nodes(
+    ground_truth: set[str],
+    parser_metadata: dict[str, Any] | None,
+) -> set[str]:
+    if not ground_truth:
+        return set()
+    if not isinstance(parser_metadata, dict):
+        return {str(node).strip() for node in ground_truth if str(node).strip()}
+    mapping = parser_metadata.get("raw_subject_to_canonical_node")
+    if not isinstance(mapping, dict) or not mapping:
+        return {str(node).strip() for node in ground_truth if str(node).strip()}
+    canonical = set()
+    for node in ground_truth:
+        text = str(node).strip()
+        if not text:
+            continue
+        canonical.add(str(mapping.get(text, text)).strip())
+    return {node for node in canonical if node}
 
 
 def _decompose_optc_metadata(
@@ -1198,18 +1219,19 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
 
     with _temporary_cwd(workspace):
         source_logs = _normalize_tc3_source_logs(cfg.source_logs)
+        parser_metadata: dict[str, Any] = {}
         if cfg.host == "cadets":
-            subject_list, object_list, event_count = vendor.parser_cadets(source_logs)
+            subject_list, object_list, event_count, parser_metadata = vendor.parser_cadets(source_logs)
             subject_node = vendor.encode_cadets(subject_list, object_list, event_count)
             edge_list = vendor.cut_task(subject_list, return_task_components=True, **task_component_kwargs)
             raw_vectors = vendor.get_node_vec(subject_node)
         elif cfg.host == "fivedirections":
-            subject_list, object_list, event_count = vendor.parser_fivedirections(source_logs)
+            subject_list, object_list, event_count, parser_metadata = vendor.parser_fivedirections(source_logs)
             subject_node = vendor.encode_fivedirections(subject_list, object_list, event_count)
             edge_list = vendor.cut_task(subject_list, **task_component_kwargs)
             raw_vectors = vendor.get_node_vec(subject_node)
         elif cfg.host == "trace":
-            subject_list, object_list, event_count = vendor.parser_trace(source_logs)
+            subject_list, object_list, event_count, parser_metadata = vendor.parser_trace(source_logs)
             subject_node = vendor.encode_trace(subject_list, object_list, event_count)
             edge_list = vendor.cut_task(subject_list, return_task_components=True, **task_component_kwargs)
             raw_vectors = vendor.get_node_vec(subject_node)
@@ -1223,10 +1245,11 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
                 )
         else:
             edge_list, raw_vectors = vendor.filters(source_logs, **task_component_kwargs)
-        raw_graphs = vendor.decompose(edge_list, raw_vectors, cfg.host)
+        canonical_ground_truth = _canonicalize_ground_truth_nodes(ground_truth, parser_metadata)
+        raw_graphs = vendor.decompose(edge_list, raw_vectors, cfg.host, canonical_ground_truth=canonical_ground_truth)
 
     embeddings_map = _vector_rows_to_map(raw_vectors)
-    graph_metas = _decompose_tc3_metadata(edge_list, ground_truth)
+    graph_metas = _decompose_tc3_metadata(edge_list, canonical_ground_truth)
     _validate_graph_meta_alignment(raw_graphs, graph_metas, f"tc3/{cfg.host}")
     base_edge_rows = edge_list.get("edge_list", edge_list) if isinstance(edge_list, dict) else edge_list
     selected_edge_list = [list(edge) for edge in base_edge_rows]
@@ -1239,6 +1262,7 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
         "selected_edge_list": selected_edge_list,
         "selected_embeddings": embeddings_map,
         "sequence_feature_dim": _feature_dim_from_map(embeddings_map),
+        "thread_merge_metadata": copy.deepcopy(parser_metadata),
         "theia_temporal_split_summary": copy.deepcopy(edge_list.get("theia_temporal_split_summary", {}))
         if isinstance(edge_list, dict)
         else {},
@@ -1665,6 +1689,77 @@ def _shuffle_dataset_with_graphs(
     return shuffled_dataset, shuffled_graphs, shuffled_graph_metas
 
 
+def _split_graphs_with_metas(
+    cfg: FusionConfig,
+    graphs: Sequence[dict[str, Any]],
+    graph_metas: Sequence[dict[str, Any]],
+    test_fraction: float = 0.2,
+) -> dict[str, Any]:
+    count = len(graphs)
+    labels = np.asarray(
+        [int(graph.get("label", meta.get("label", 0))) for graph, meta in zip(graphs, graph_metas)],
+        dtype=np.int64,
+    )
+    unique_labels, label_counts = np.unique(labels, return_counts=True) if len(labels) else (np.asarray([]), np.asarray([]))
+    stratified = bool(len(unique_labels) >= 2 and int(label_counts.min()) >= 2 and count >= 3)
+
+    if count <= 1:
+        train_indices = list(range(count))
+        eval_indices: list[int] = []
+        split_mode = "degenerate_all_train"
+    elif stratified:
+        splitter = StratifiedShuffleSplit(
+            n_splits=1,
+            test_size=float(test_fraction),
+            random_state=int(cfg.random_seed),
+        )
+        train_idx, eval_idx = next(splitter.split(np.zeros((count, 1)), labels))
+        train_indices = [int(index) for index in train_idx.tolist()]
+        eval_indices = [int(index) for index in eval_idx.tolist()]
+        split_mode = "stratified_shuffle_split"
+    else:
+        rng = random.Random(int(cfg.random_seed))
+        indices = list(range(count))
+        rng.shuffle(indices)
+        eval_count = max(1, int(round(count * float(test_fraction))))
+        if eval_count >= count:
+            eval_count = max(0, count - 1)
+        eval_indices = sorted(indices[:eval_count])
+        train_indices = sorted(indices[eval_count:]) if eval_count > 0 else sorted(indices)
+        split_mode = "random_shuffle_fallback"
+
+    train_graphs = [copy.deepcopy(graphs[index]) for index in train_indices]
+    train_graph_metas = [copy.deepcopy(graph_metas[index]) for index in train_indices]
+    eval_graphs = [copy.deepcopy(graphs[index]) for index in eval_indices]
+    eval_graph_metas = [copy.deepcopy(graph_metas[index]) for index in eval_indices]
+
+    return {
+        "mode": split_mode,
+        "stratified": stratified,
+        "seed": int(cfg.random_seed),
+        "test_fraction": float(test_fraction),
+        "raw_task_count": int(count),
+        "raw_positive_count": int(labels.sum()) if len(labels) else 0,
+        "raw_negative_count": int(count - labels.sum()) if len(labels) else 0,
+        "train_task_count_raw": int(len(train_graphs)),
+        "train_positive_count_raw": int(sum(int(graph.get("label", meta.get("label", 0))) for graph, meta in zip(train_graphs, train_graph_metas))),
+        "train_negative_count_raw": int(
+            len(train_graphs)
+            - sum(int(graph.get("label", meta.get("label", 0))) for graph, meta in zip(train_graphs, train_graph_metas))
+        ),
+        "eval_task_count": int(len(eval_graphs)),
+        "eval_positive_count": int(sum(int(graph.get("label", meta.get("label", 0))) for graph, meta in zip(eval_graphs, eval_graph_metas))),
+        "eval_negative_count": int(
+            len(eval_graphs)
+            - sum(int(graph.get("label", meta.get("label", 0))) for graph, meta in zip(eval_graphs, eval_graph_metas))
+        ),
+        "train_graphs": train_graphs,
+        "train_graph_metas": train_graph_metas,
+        "eval_graphs": eval_graphs,
+        "eval_graph_metas": eval_graph_metas,
+    }
+
+
 def _predict_rows(
     model,
     loader,
@@ -1864,24 +1959,72 @@ def _train_tc3_exact(
     workspace: Path,
     bundle: dict[str, Any],
     model_path: Path,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> dict[str, Any]:
     data_path = workspace / "data" / bundle["dataset_name"] / "data.pt"
     ensure_parent(data_path)
+    base_graphs = copy.deepcopy(bundle["selected_graphs"])
+    base_graph_metas = copy.deepcopy(bundle["selected_graph_metas"])
+    base_feature_dim = int(bundle.get("base_sequence_feature_dim", bundle["sequence_feature_dim"]))
+    split_before_augment = not bool(cfg.task_tapas_augmentation_before_split)
+
     with _temporary_cwd(workspace):
-        random.seed(173)
-        train_graphs, train_graph_metas = _augment_graphs_preserve_stats_tc3(
-            cfg,
-            vendor,
-            copy.deepcopy(bundle["selected_graphs"]),
-            copy.deepcopy(bundle["selected_graph_metas"]),
+        random.seed(int(cfg.random_seed))
+        np.random.seed(int(cfg.random_seed))
+        torch.manual_seed(int(cfg.random_seed))
+        if split_before_augment:
+            raw_split = _split_graphs_with_metas(cfg, base_graphs, base_graph_metas)
+            final_train_graphs, final_train_graph_metas = _augment_graphs_preserve_stats_tc3(
+                cfg,
+                vendor,
+                copy.deepcopy(raw_split["train_graphs"]),
+                copy.deepcopy(raw_split["train_graph_metas"]),
+                bundle["dataset_name"],
+                base_feature_dim,
+            )
+            eval_graphs = copy.deepcopy(raw_split["eval_graphs"])
+            eval_graph_metas = copy.deepcopy(raw_split["eval_graph_metas"])
+            split_mode = "split_before_augment"
+            split_summary = raw_split
+        else:
+            augmented_graphs, augmented_graph_metas = _augment_graphs_preserve_stats_tc3(
+                cfg,
+                vendor,
+                base_graphs,
+                base_graph_metas,
+                bundle["dataset_name"],
+                base_feature_dim,
+            )
+            augmented_split = _split_graphs_with_metas(cfg, augmented_graphs, augmented_graph_metas)
+            final_train_graphs = copy.deepcopy(augmented_split["train_graphs"])
+            final_train_graph_metas = copy.deepcopy(augmented_split["train_graph_metas"])
+            eval_graphs = copy.deepcopy(augmented_split["eval_graphs"])
+            eval_graph_metas = copy.deepcopy(augmented_split["eval_graph_metas"])
+            split_mode = "augment_before_split"
+            split_summary = augmented_split
+        torch.save(final_train_graphs, data_path)
+        vendor.train(
+            [0.001, 100, 500],
             bundle["dataset_name"],
-            int(bundle.get("base_sequence_feature_dim", bundle["sequence_feature_dim"])),
+            class_weight_w0=1.0,
+            class_weight_w1=2.0,
+            dropout_p=0.0,
+            seed=int(cfg.random_seed),
+            train_eval_split=False,
         )
-        torch.save(train_graphs, data_path)
-        vendor.train([0.001, 100, 500], bundle["dataset_name"])
     workspace_model = _vendor_model_path(workspace, "tc3", bundle["dataset_name"])
     _copy_model_to_output(workspace_model, model_path)
-    return train_graphs, train_graph_metas
+    return {
+        "train_graphs": final_train_graphs,
+        "train_graph_metas": final_train_graph_metas,
+        "eval_graphs": eval_graphs,
+        "eval_graph_metas": eval_graph_metas,
+        "split_mode": split_mode,
+        "split_summary": {
+            key: value
+            for key, value in split_summary.items()
+            if key not in {"train_graphs", "train_graph_metas", "eval_graphs", "eval_graph_metas"}
+        },
+    }
 
 
 def _train_optc_exact(
@@ -1921,7 +2064,7 @@ def _train_optc_exact(
             data_all += augmented
             data_all_metas += augmented_metas
         torch.save(data_all, optc_root / "data_all.pt")
-        vendor.train([0.001, 200, 500])
+        vendor.train([0.001, 200, 500], seed=2025, train_eval_split=False)
     workspace_model = _vendor_model_path(workspace, "optc", bundle["dataset_name"])
     _copy_model_to_output(workspace_model, model_path)
     return data_all, data_all_metas, augmented_by_host, augmented_metas_by_host
@@ -1930,23 +2073,19 @@ def _train_optc_exact(
 def _evaluate_tc3_exact(
     model_path: Path,
     vendor: ModuleType,
-    graphs: list[dict[str, Any]],
-    graph_metas: list[dict[str, Any]],
+    train_graphs: list[dict[str, Any]],
+    train_graph_metas: list[dict[str, Any]],
+    eval_graphs: list[dict[str, Any]],
+    eval_graph_metas: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    dataset = vendor.MyOwnDataset(graphs)
-    shuffled_dataset, shuffled_graphs, shuffled_graph_metas = _shuffle_dataset_with_graphs(dataset, graphs, graph_metas, seed=2025)
-    index = int(0.8 * len(shuffled_dataset))
-    train_data = shuffled_dataset[:index]
-    test_data = shuffled_dataset[index:]
-    train_graphs = shuffled_graphs[:index]
-    train_graph_metas = shuffled_graph_metas[:index]
-    test_graphs = shuffled_graphs[index:]
-    test_graph_metas = shuffled_graph_metas[index:]
     model = _torch_load(model_path)
-    train_loader = DataLoader(train_data, batch_size=500, shuffle=False)
-    test_loader = DataLoader(test_data, shuffle=False)
+    train_loader = DataLoader(vendor.MyOwnDataset(train_graphs), batch_size=500, shuffle=False)
     train_rows, train_metrics = _predict_rows(model, train_loader, train_graphs, train_graph_metas)
-    eval_rows, eval_metrics = _predict_rows(model, test_loader, test_graphs, test_graph_metas)
+    if eval_graphs:
+        test_loader = DataLoader(vendor.MyOwnDataset(eval_graphs), shuffle=False)
+        eval_rows, eval_metrics = _predict_rows(model, test_loader, eval_graphs, eval_graph_metas)
+    else:
+        eval_rows, eval_metrics = [], {}
     return train_rows, train_metrics, eval_rows, eval_metrics
 
 
@@ -2059,12 +2198,14 @@ def run_tapas_module2(cfg: FusionConfig, module1_dir: Path, out_dir: Path) -> di
     if cfg.task_detector_mode == "fit_predict":
         model_path = _model_output_path(cfg, out_dir)
         if bundle["family"] == "tc3":
-            training_graphs, training_graph_metas = _train_tc3_exact(cfg, vendor, workspace, bundle, model_path)
+            tc3_fit = _train_tc3_exact(cfg, vendor, workspace, bundle, model_path)
             train_rows, train_metrics, eval_rows, eval_metrics = _evaluate_tc3_exact(
                 model_path,
                 vendor,
-                training_graphs,
-                training_graph_metas,
+                tc3_fit["train_graphs"],
+                tc3_fit["train_graph_metas"],
+                tc3_fit["eval_graphs"],
+                tc3_fit["eval_graph_metas"],
             )
             eval_dataset_name = bundle["dataset_name"]
             train_dataset_name = bundle["dataset_name"]
@@ -2110,6 +2251,13 @@ def run_tapas_module2(cfg: FusionConfig, module1_dir: Path, out_dir: Path) -> di
                 else "tapas_graphsage",
             }
         )
+        if bundle["family"] == "tc3":
+            summary.update(
+                {
+                    "fit_split_mode": str(tc3_fit.get("split_mode", "")),
+                    "fit_split_summary": copy.deepcopy(tc3_fit.get("split_summary", {})),
+                }
+            )
         summary.update(_score_summary(eval_rows))
         summary.update(
             {
@@ -2119,6 +2267,8 @@ def run_tapas_module2(cfg: FusionConfig, module1_dir: Path, out_dir: Path) -> di
                 "train_task_count": len(train_rows),
                 "train_positive_count": int(sum(int(row["task_label"]) for row in train_rows)),
                 "train_negative_count": int(len(train_rows) - sum(int(row["task_label"]) for row in train_rows)),
+                "evaluation_positive_count": int(sum(int(row["task_label"]) for row in eval_rows)),
+                "evaluation_negative_count": int(len(eval_rows) - sum(int(row["task_label"]) for row in eval_rows)),
                 "train_dataset_name": train_dataset_name,
                 "evaluation_dataset_name": eval_dataset_name,
             }

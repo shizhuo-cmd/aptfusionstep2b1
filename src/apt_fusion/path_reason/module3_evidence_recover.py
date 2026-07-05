@@ -520,8 +520,8 @@ def _task_root_leaf_ids(
         neighbors.setdefault(src, set()).add(dst)
         neighbors.setdefault(dst, set()).add(src)
 
-    root_process_ids = sorted([pid for pid in process_ids if outdegree.get(pid, 0) == 0])
-    leaf_process_ids = sorted([pid for pid in process_ids if indegree.get(pid, 0) == 0])
+    root_process_ids = sorted([pid for pid in process_ids if indegree.get(pid, 0) == 0])
+    leaf_process_ids = sorted([pid for pid in process_ids if outdegree.get(pid, 0) == 0])
     return root_process_ids, leaf_process_ids, indegree, outdegree, neighbors
 
 
