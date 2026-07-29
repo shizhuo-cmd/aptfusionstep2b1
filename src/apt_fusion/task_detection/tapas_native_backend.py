@@ -1337,7 +1337,12 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
         parser_metadata["object_linked_ground_truth_canonical_count"] = len(object_linked_ground_truth)
         canonical_ground_truth |= object_linked_ground_truth
         parser_metadata["combined_ground_truth_canonical_count"] = len(canonical_ground_truth)
-        raw_graphs = vendor.decompose(edge_list, raw_vectors, cfg.host, canonical_ground_truth=canonical_ground_truth)
+    raw_graphs = vendor.decompose(
+        edge_list,
+        raw_vectors,
+        cfg.host,
+        canonical_ground_truth=canonical_ground_truth,
+    )
 
     embeddings_map = _vector_rows_to_map(raw_vectors)
     graph_metas = _decompose_tc3_metadata(edge_list, canonical_ground_truth)
