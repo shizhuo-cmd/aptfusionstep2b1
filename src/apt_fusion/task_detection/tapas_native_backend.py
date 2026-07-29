@@ -22,6 +22,8 @@ import torch
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import accuracy_score, average_precision_score, precision_recall_fscore_support, roc_auc_score
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 from torch_geometric.loader import DataLoader
 
@@ -1804,6 +1806,330 @@ def _split_graphs_with_metas(
         [int(graph.get("label", meta.get("label", 0))) for graph, meta in zip(graphs, graph_metas)],
         dtype=np.int64,
     )
+
+
+def _normal_only_label(graph: dict[str, Any], meta: dict[str, Any]) -> int:
+    return int(graph.get("label", meta.get("label", 0)))
+
+
+def _normal_only_timestamp(meta: dict[str, Any]) -> float | None:
+    for key in (
+        "first_timestamp_sec",
+        "temporal_component_first_timestamp_sec",
+        "first_timestamp",
+    ):
+        value = _float_or_none(meta.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _normal_only_temporal_split(
+    cfg: FusionConfig,
+    graphs: Sequence[dict[str, Any]],
+    graph_metas: Sequence[dict[str, Any]],
+) -> dict[str, list[int] | dict[str, Any]]:
+    """Keep attacks out of fitting and pick the threshold from benign graphs only."""
+    benign_indices = [
+        index
+        for index, (graph, meta) in enumerate(zip(graphs, graph_metas))
+        if _normal_only_label(graph, meta) == 0
+    ]
+    positive_indices = [
+        index
+        for index, (graph, meta) in enumerate(zip(graphs, graph_metas))
+        if _normal_only_label(graph, meta) == 1
+    ]
+    benign_indices.sort(
+        key=lambda index: (
+            _normal_only_timestamp(graph_metas[index]) is None,
+            _normal_only_timestamp(graph_metas[index]) or 0.0,
+            str(graph_metas[index].get("task_id", f"task_{index:04d}")),
+        )
+    )
+    benign_count = len(benign_indices)
+    if benign_count < 3:
+        raise ValueError("normal-only detection requires at least three benign task graphs")
+
+    train_count = max(1, int(np.floor(benign_count * float(cfg.task_normal_only_train_fraction))))
+    validation_count = max(1, int(np.floor(benign_count * float(cfg.task_normal_only_validation_fraction))))
+    if train_count + validation_count >= benign_count:
+        validation_count = max(1, benign_count - train_count - 1)
+    if validation_count <= 0:
+        raise ValueError("normal-only detection requires a held-out benign validation partition")
+
+    train_indices = benign_indices[:train_count]
+    validation_indices = benign_indices[train_count : train_count + validation_count]
+    eval_benign_indices = benign_indices[train_count + validation_count :]
+    if not eval_benign_indices:
+        eval_benign_indices = validation_indices[-1:]
+        validation_indices = validation_indices[:-1]
+    if not validation_indices:
+        raise ValueError("normal-only validation partition became empty")
+
+    return {
+        "train_indices": train_indices,
+        "validation_indices": validation_indices,
+        "evaluation_indices": eval_benign_indices + positive_indices,
+        "summary": {
+            "strategy": "temporal_benign_split_with_all_known_attacks_held_out",
+            "train_benign_count": len(train_indices),
+            "validation_benign_count": len(validation_indices),
+            "evaluation_benign_count": len(eval_benign_indices),
+            "evaluation_known_attack_count": len(positive_indices),
+            "positive_graphs_used_for_training": 0,
+            "positive_graphs_used_for_threshold_selection": 0,
+        },
+    }
+
+
+def _normal_only_graph_feature(graph: dict[str, Any], meta: dict[str, Any]) -> np.ndarray:
+    nodes = np.asarray(graph.get("nodes", []), dtype=np.float64)
+    if nodes.ndim != 2 or nodes.shape[0] == 0:
+        raise ValueError(f"task {meta.get('task_id', '')} has no usable node features")
+    root_id = str(meta.get("task_root_id", ""))
+    node_ids = [str(node) for node in meta.get("node_ids", [])]
+    try:
+        root_index = node_ids.index(root_id)
+    except ValueError:
+        root_index = 0
+    root = nodes[min(root_index, len(nodes) - 1)]
+    mean = nodes.mean(axis=0)
+    maximum = nodes.max(axis=0)
+    structure = np.asarray(
+        [
+            np.log1p(len(nodes)),
+            np.log1p(len(graph.get("edges", []))),
+            float(root_index == 0),
+        ],
+        dtype=np.float64,
+    )
+    return np.concatenate([root, mean, maximum, structure])
+
+
+def _normal_only_graph_matrix(
+    graphs: Sequence[dict[str, Any]],
+    graph_metas: Sequence[dict[str, Any]],
+    indices: Sequence[int],
+) -> np.ndarray:
+    return np.asarray(
+        [_normal_only_graph_feature(graphs[index], graph_metas[index]) for index in indices],
+        dtype=np.float64,
+    )
+
+
+def _normal_only_node_matrix(graphs: Sequence[dict[str, Any]], indices: Sequence[int]) -> np.ndarray:
+    matrices = [
+        np.asarray(graphs[index].get("nodes", []), dtype=np.float64)
+        for index in indices
+        if len(graphs[index].get("nodes", [])) > 0
+    ]
+    if not matrices:
+        raise ValueError("normal-only detection found no process-node features in benign training tasks")
+    return np.concatenate(matrices, axis=0)
+
+
+def _normal_only_sample_rows(matrix: np.ndarray, limit: int, seed: int) -> np.ndarray:
+    if len(matrix) <= limit:
+        return matrix
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(len(matrix), size=limit, replace=False)
+    return matrix[np.sort(indices)]
+
+
+def _normal_only_fit_kmeans(matrix: np.ndarray, requested_clusters: int, seed: int) -> MiniBatchKMeans:
+    cluster_count = max(1, min(int(requested_clusters), len(matrix)))
+    return MiniBatchKMeans(
+        n_clusters=cluster_count,
+        random_state=int(seed),
+        batch_size=min(4096, max(64, len(matrix))),
+        n_init=10,
+    ).fit(matrix)
+
+
+def _normal_only_node_local_scores(
+    graphs: Sequence[dict[str, Any]],
+    indices: Sequence[int],
+    node_scaler: StandardScaler,
+    node_model: MiniBatchKMeans,
+    top_k: int,
+) -> np.ndarray:
+    scores: list[float] = []
+    for index in indices:
+        nodes = np.asarray(graphs[index].get("nodes", []), dtype=np.float64)
+        if nodes.ndim != 2 or len(nodes) == 0:
+            scores.append(0.0)
+            continue
+        distances = node_model.transform(node_scaler.transform(nodes)).min(axis=1)
+        keep = min(max(1, int(top_k)), len(distances))
+        scores.append(float(np.partition(distances, len(distances) - keep)[-keep:].mean()))
+    return np.asarray(scores, dtype=np.float64)
+
+
+def _normal_only_global_scores(
+    graph_matrix: np.ndarray,
+    graph_scaler: StandardScaler,
+    graph_model: MiniBatchKMeans,
+) -> np.ndarray:
+    return graph_model.transform(graph_scaler.transform(graph_matrix)).min(axis=1).astype(np.float64)
+
+
+def _normal_only_robust_scale(reference: np.ndarray) -> tuple[float, float]:
+    center = float(np.median(reference))
+    mad = float(np.median(np.abs(reference - center)))
+    return center, max(1e-8, 1.4826 * mad)
+
+
+def _normal_only_combine_scores(
+    local_scores: np.ndarray,
+    global_scores: np.ndarray,
+    local_center: float,
+    local_scale: float,
+    global_center: float,
+    global_scale: float,
+    global_weight: float,
+) -> np.ndarray:
+    local_normalized = np.maximum(0.0, (local_scores - local_center) / local_scale)
+    global_normalized = np.maximum(0.0, (global_scores - global_center) / global_scale)
+    return ((1.0 - float(global_weight)) * local_normalized) + (float(global_weight) * global_normalized)
+
+
+def _run_normal_only_tc3(
+    cfg: FusionConfig,
+    bundle: dict[str, Any],
+    model_path: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    graphs = copy.deepcopy(bundle["selected_graphs"])
+    metas = copy.deepcopy(bundle["selected_graph_metas"])
+    split = _normal_only_temporal_split(cfg, graphs, metas)
+    train_indices = list(split["train_indices"])
+    validation_indices = list(split["validation_indices"])
+    evaluation_indices = list(split["evaluation_indices"])
+
+    train_nodes = _normal_only_sample_rows(
+        _normal_only_node_matrix(graphs, train_indices),
+        int(cfg.task_normal_only_node_sample_limit),
+        int(cfg.random_seed),
+    )
+    node_scaler = StandardScaler().fit(train_nodes)
+    node_model = _normal_only_fit_kmeans(
+        node_scaler.transform(train_nodes),
+        int(cfg.task_normal_only_node_prototypes),
+        int(cfg.random_seed),
+    )
+
+    train_graph_matrix = _normal_only_graph_matrix(graphs, metas, train_indices)
+    graph_scaler = StandardScaler().fit(train_graph_matrix)
+    graph_model = _normal_only_fit_kmeans(
+        graph_scaler.transform(train_graph_matrix),
+        int(cfg.task_normal_only_task_prototypes),
+        int(cfg.random_seed),
+    )
+
+    validation_local = _normal_only_node_local_scores(
+        graphs, validation_indices, node_scaler, node_model, int(cfg.task_normal_only_local_top_k)
+    )
+    validation_global = _normal_only_global_scores(
+        _normal_only_graph_matrix(graphs, metas, validation_indices), graph_scaler, graph_model
+    )
+    local_center, local_scale = _normal_only_robust_scale(validation_local)
+    global_center, global_scale = _normal_only_robust_scale(validation_global)
+    validation_scores = _normal_only_combine_scores(
+        validation_local,
+        validation_global,
+        local_center,
+        local_scale,
+        global_center,
+        global_scale,
+        float(cfg.task_normal_only_global_weight),
+    )
+    threshold = float(np.quantile(validation_scores, 1.0 - float(cfg.task_normal_only_validation_fpr)))
+
+    evaluation_local = _normal_only_node_local_scores(
+        graphs, evaluation_indices, node_scaler, node_model, int(cfg.task_normal_only_local_top_k)
+    )
+    evaluation_global = _normal_only_global_scores(
+        _normal_only_graph_matrix(graphs, metas, evaluation_indices), graph_scaler, graph_model
+    )
+    evaluation_scores = _normal_only_combine_scores(
+        evaluation_local,
+        evaluation_global,
+        local_center,
+        local_scale,
+        global_center,
+        global_scale,
+        float(cfg.task_normal_only_global_weight),
+    )
+
+    rows: list[dict[str, Any]] = []
+    for index, local_score, global_score, final_score in zip(
+        evaluation_indices,
+        evaluation_local.tolist(),
+        evaluation_global.tolist(),
+        evaluation_scores.tolist(),
+    ):
+        graph = graphs[index]
+        meta = metas[index]
+        label = _normal_only_label(graph, meta)
+        predicted = int(final_score >= threshold)
+        rows.append(
+            {
+                "task_id": str(meta.get("task_id", f"task_{index:04d}")),
+                "task_score": float(final_score),
+                "task_probability": float(final_score),
+                "graphsage_probability": None,
+                "stats_probability": None,
+                "normal_only_local_score": float(local_score),
+                "normal_only_global_score": float(global_score),
+                "fusion_weight_stats": 0.0,
+                "task_label": label,
+                "predicted_label": predicted,
+                "prediction_mode": "normal_only_validation_threshold",
+                "task_score_basis": "normal_process_topk_plus_task_prototype_distance",
+                "threshold_used": threshold,
+                "is_suspicious": bool(predicted),
+                "task_size": int(meta.get("task_size", len(graph.get("nodes", [])))),
+                "internal_edge_count": int(meta.get("internal_edge_count", len(graph.get("edges", [])))),
+                "process_ids": [str(node) for node in meta.get("node_ids", [])],
+                "process_stat_overrides": copy.deepcopy(meta.get("process_stat_overrides", {})),
+            }
+        )
+    rows.sort(key=lambda row: (float(row["task_score"]), row["task_id"]), reverse=True)
+
+    model = {
+        "mode": "normal_only_multimodal_prototype",
+        "node_scaler": node_scaler,
+        "node_model": node_model,
+        "graph_scaler": graph_scaler,
+        "graph_model": graph_model,
+        "local_center": local_center,
+        "local_scale": local_scale,
+        "global_center": global_center,
+        "global_scale": global_scale,
+        "threshold": threshold,
+        "config": {
+            "task_prototypes": int(node_model.n_clusters),
+            "graph_prototypes": int(graph_model.n_clusters),
+            "local_top_k": int(cfg.task_normal_only_local_top_k),
+            "global_weight": float(cfg.task_normal_only_global_weight),
+            "validation_fpr": float(cfg.task_normal_only_validation_fpr),
+        },
+    }
+    ensure_parent(model_path)
+    with model_path.open("wb") as fh:
+        pickle.dump(model, fh)
+    return rows, _rows_metrics(rows), {
+        **copy.deepcopy(split["summary"]),
+        "node_training_sample_count": int(len(train_nodes)),
+        "node_prototype_count": int(node_model.n_clusters),
+        "task_prototype_count": int(graph_model.n_clusters),
+        "threshold": threshold,
+        "threshold_source": "benign_validation_quantile",
+        "validation_fpr_target": float(cfg.task_normal_only_validation_fpr),
+        "validation_score_min": float(validation_scores.min()),
+        "validation_score_max": float(validation_scores.max()),
+        "validation_score_median": float(np.median(validation_scores)),
+    }
     unique_labels, label_counts = np.unique(labels, return_counts=True) if len(labels) else (np.asarray([]), np.asarray([]))
     stratified = bool(len(unique_labels) >= 2 and int(label_counts.min()) >= 2 and count >= 3)
 
@@ -2453,6 +2779,54 @@ def _summary_common(cfg: FusionConfig, bundle: dict[str, Any], model_path: Path)
 def run_tapas_module2(cfg: FusionConfig, module1_dir: Path, out_dir: Path) -> dict[str, Any]:
     ensure_dir(out_dir)
     bundle = _load_native_bundle(module1_dir)
+
+    if cfg.task_detector_mode == "normal_only":
+        if bundle["family"] != "tc3":
+            raise ValueError("normal_only task detection currently supports tc3 task graphs only")
+        model_path = _model_output_path(cfg, out_dir)
+        normal_rows, normal_metrics, normal_info = _run_normal_only_tc3(cfg, bundle, model_path)
+        summary = _summary_common(cfg, bundle, model_path)
+        summary.update(
+            {
+                "prediction_mode": "normal_only_validation_threshold",
+                "decision_threshold": float(normal_info["threshold"]),
+                "decision_threshold_mode": "benign_validation_quantile",
+                "decision_threshold_selection": {
+                    "mode": "benign_validation_quantile",
+                    "reason": "only benign validation task graphs select the alert threshold",
+                    "selected_threshold": float(normal_info["threshold"]),
+                    "target_false_positive_rate": float(cfg.task_normal_only_validation_fpr),
+                },
+                "task_graph_stat_late_fusion_active": False,
+                "task_graph_stat_model": "",
+                "task_graph_stat_feature_dim": 0,
+                "task_graph_stat_model_path": "",
+                "task_graph_stat_late_fusion_reason": "normal_only_detector_replaces_binary_late_fusion",
+                "task_score_basis": "normal_process_topk_plus_task_prototype_distance",
+                "normal_only": normal_info,
+                "task_count": len(normal_rows),
+                "evaluation_metrics": normal_metrics,
+                "train_metrics": {},
+                "train_task_count": int(normal_info["train_benign_count"]),
+                "train_positive_count": 0,
+                "train_negative_count": int(normal_info["train_benign_count"]),
+                "evaluation_positive_count": int(sum(int(row["task_label"]) for row in normal_rows)),
+                "evaluation_negative_count": int(
+                    len(normal_rows) - sum(int(row["task_label"]) for row in normal_rows)
+                ),
+            }
+        )
+        summary.update(_score_summary(normal_rows))
+        paths = _write_backend_outputs(out_dir, normal_rows, summary)
+        paths["task_model"] = model_path
+        return {
+            "task_rows": normal_rows,
+            "train_rows": [],
+            "summary": summary,
+            "decision_threshold": float(normal_info["threshold"]),
+            "paths": paths,
+        }
+
     workspace = _ensure_workspace(module1_dir, cfg)
     vendor = _load_vendor_for_family(bundle["family"])
     vendor.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

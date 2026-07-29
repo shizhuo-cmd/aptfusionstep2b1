@@ -39,6 +39,14 @@ class FusionConfig:
     task_detector_model_output: Path | None = None
     task_ground_truth_path: Path | None = None
     task_sequence_model_path: Path | None = None
+    task_normal_only_train_fraction: float = 0.70
+    task_normal_only_validation_fraction: float = 0.15
+    task_normal_only_task_prototypes: int = 8
+    task_normal_only_node_prototypes: int = 32
+    task_normal_only_node_sample_limit: int = 100000
+    task_normal_only_local_top_k: int = 3
+    task_normal_only_global_weight: float = 0.40
+    task_normal_only_validation_fpr: float = 0.01
     random_seed: int = 42
     task_classifier_hidden_dim: int = 64
     task_classifier_num_layers: int = 2
@@ -195,6 +203,14 @@ def load_config(path: str | Path) -> FusionConfig:
         task_detector_model_output=_optional_path(_get(data, "task_detector_model_output", "")),
         task_ground_truth_path=_optional_path(_get(data, "task_ground_truth_path", "")),
         task_sequence_model_path=_optional_path(_get(data, "task_sequence_model_path", "")),
+        task_normal_only_train_fraction=float(_get(data, "task_normal_only_train_fraction", 0.70)),
+        task_normal_only_validation_fraction=float(_get(data, "task_normal_only_validation_fraction", 0.15)),
+        task_normal_only_task_prototypes=int(_get(data, "task_normal_only_task_prototypes", 8)),
+        task_normal_only_node_prototypes=int(_get(data, "task_normal_only_node_prototypes", 32)),
+        task_normal_only_node_sample_limit=int(_get(data, "task_normal_only_node_sample_limit", 100000)),
+        task_normal_only_local_top_k=int(_get(data, "task_normal_only_local_top_k", 3)),
+        task_normal_only_global_weight=float(_get(data, "task_normal_only_global_weight", 0.40)),
+        task_normal_only_validation_fpr=float(_get(data, "task_normal_only_validation_fpr", 0.01)),
         random_seed=int(_get(data, "random_seed", 42)),
         task_classifier_hidden_dim=int(_get(data, "task_classifier_hidden_dim", 64)),
         task_classifier_num_layers=int(_get(data, "task_classifier_num_layers", 2)),
@@ -323,7 +339,7 @@ def _validate(cfg: FusionConfig) -> None:
             f"{sorted(allowed_task_detection_backends)}"
         )
 
-    allowed_task_detector_modes = {"fit_predict", "load_and_predict"}
+    allowed_task_detector_modes = {"fit_predict", "load_and_predict", "normal_only"}
     if cfg.task_detector_mode not in allowed_task_detector_modes:
         raise ValueError(
             f"task_detector_mode must be one of {sorted(allowed_task_detector_modes)}"
@@ -331,6 +347,33 @@ def _validate(cfg: FusionConfig) -> None:
 
     if cfg.task_classifier_hidden_dim <= 0:
         raise ValueError("task_classifier_hidden_dim must be > 0")
+
+    if not (0.0 < cfg.task_normal_only_train_fraction < 1.0):
+        raise ValueError("task_normal_only_train_fraction must be in (0, 1)")
+
+    if not (0.0 < cfg.task_normal_only_validation_fraction < 1.0):
+        raise ValueError("task_normal_only_validation_fraction must be in (0, 1)")
+
+    if cfg.task_normal_only_train_fraction + cfg.task_normal_only_validation_fraction >= 1.0:
+        raise ValueError("normal-only train and validation fractions must sum to less than 1")
+
+    if cfg.task_normal_only_task_prototypes <= 0:
+        raise ValueError("task_normal_only_task_prototypes must be > 0")
+
+    if cfg.task_normal_only_node_prototypes <= 0:
+        raise ValueError("task_normal_only_node_prototypes must be > 0")
+
+    if cfg.task_normal_only_node_sample_limit <= 0:
+        raise ValueError("task_normal_only_node_sample_limit must be > 0")
+
+    if cfg.task_normal_only_local_top_k <= 0:
+        raise ValueError("task_normal_only_local_top_k must be > 0")
+
+    if not (0.0 <= cfg.task_normal_only_global_weight <= 1.0):
+        raise ValueError("task_normal_only_global_weight must be in [0, 1]")
+
+    if not (0.0 < cfg.task_normal_only_validation_fpr < 1.0):
+        raise ValueError("task_normal_only_validation_fpr must be in (0, 1)")
 
     if cfg.task_classifier_num_layers <= 0:
         raise ValueError("task_classifier_num_layers must be > 0")
