@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import csv
+import ast
 import importlib.util
 import os
 import pickle
@@ -19,7 +21,7 @@ import pandas as pd
 import torch
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import accuracy_score, average_precision_score, precision_recall_fscore_support, roc_auc_score
-from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 from sklearn.utils.class_weight import compute_sample_weight
 from torch_geometric.loader import DataLoader
 
@@ -30,7 +32,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 from ..common import ensure_dir, ensure_parent, save_json
 from ..config import FusionConfig
-from .ocr_stat_features import extract_process_stat_features
+from .ocr_stat_features import extract_process_stat_features, extract_process_stat_features_from_tc3_event_count
 
 _WORKSPACE_DIRNAME = "tapas_native_workspace"
 _NATIVE_GRAPH_FILENAME = "tapas_native_graphs.pt"
@@ -137,7 +139,7 @@ def _graphsage_node_feature_sources(cfg: FusionConfig) -> dict[str, bool]:
 
 
 def _tc3_supported_hosts() -> set[str]:
-    return {"trace", "cadets", "fivedirections", "theia"}
+    return {"trace", "cadets", "fivedirections", "theia", "theia_e5"}
 
 
 def _optc_eval_dataset_name(host: str) -> str:
@@ -198,6 +200,11 @@ def _copy_vendor_support_files(workspace: Path, cfg: FusionConfig) -> None:
     for source in (vendor_root / "model").glob("*"):
         if source.is_file():
             shutil.copy2(source, model_dir / source.name)
+    if cfg.task_sequence_model_path is not None:
+        if not cfg.task_sequence_model_path.exists():
+            raise FileNotFoundError(f"Configured task sequence model does not exist: {cfg.task_sequence_model_path}")
+        # Vendor parsers load this fixed filename from the isolated module1 workspace.
+        shutil.copy2(cfg.task_sequence_model_path, model_dir / "stackedlstm_tc.pt")
 
     if cfg.task_ground_truth_path is not None and cfg.task_ground_truth_path.exists():
         if cfg.dataset_family == "optc":
@@ -225,7 +232,46 @@ def _normalize_tc3_source_logs(source_logs: Path) -> str:
 def _load_ground_truth(path: Path | None) -> set[str]:
     if path is None or not path.exists():
         return set()
+    if path.suffix.lower() == ".csv":
+        # ORTHRUS E5 node exports place the original CDM UUID in column zero.
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            return {
+                row[0].strip()
+                for row in csv.reader(handle)
+                if row and row[0].strip()
+            }
     return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+
+def _load_theia_e5_ground_truth_entity_types(path: Path | None) -> dict[str, str]:
+    """Read ORTHRUS node exports without treating non-Subject UUIDs as processes."""
+    if path is None or not path.exists() or path.suffix.lower() != ".csv":
+        return {}
+    entity_types: dict[str, str] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.reader(handle):
+            if not row or not row[0].strip():
+                continue
+            attributes: dict[str, Any] = {}
+            if len(row) > 1:
+                try:
+                    value = ast.literal_eval(row[1])
+                    if isinstance(value, dict):
+                        attributes = value
+                except (SyntaxError, ValueError):
+                    pass
+            # ORTHRUS exports use the entity family as the attribute key,
+            # e.g. {"subject": "/usr/sbin/sshd"}, rather than a type value.
+            entity_type = next(
+                (
+                    key
+                    for key in ("subject", "file", "netflow")
+                    if key in attributes
+                ),
+                "",
+            )
+            entity_types[row[0].strip()] = entity_type or "unknown"
+    return entity_types
 
 
 def _vector_rows_to_map(raw_vectors: Any) -> dict[str, list[float]]:
@@ -374,6 +420,7 @@ def _graph_stat_feature_vector(
     process_ids: Sequence[Any],
     stat_embeddings_map: dict[str, list[float]],
     stat_feature_dim: int,
+    stat_overrides: dict[str, list[float]] | None = None,
 ) -> np.ndarray:
     feature_dim = _graph_stat_feature_dim(stat_feature_dim)
     if feature_dim <= 0:
@@ -383,12 +430,10 @@ def _graph_stat_feature_vector(
     active_nodes = 0
     nonzero_entries = 0
     total_entries = 0
+    stat_overrides = stat_overrides or {}
     for process_id in process_ids:
-        stats = [float(value) for value in stat_embeddings_map.get(str(process_id), [])]
-        if len(stats) < stat_feature_dim:
-            stats.extend([0.0] * (stat_feature_dim - len(stats)))
-        elif len(stats) > stat_feature_dim:
-            stats = stats[:stat_feature_dim]
+        raw_stats = stat_overrides.get(str(process_id), stat_embeddings_map.get(str(process_id), []))
+        stats = _normalize_stat_vector(raw_stats, stat_feature_dim)
         node_stats.append(stats)
         if any(abs(value) > 1e-12 for value in stats):
             active_nodes += 1
@@ -424,7 +469,12 @@ def _rows_to_graph_stat_matrix(
     if not rows or feature_dim <= 0:
         return np.zeros((0, feature_dim), dtype=np.float64)
     matrix = [
-        _graph_stat_feature_vector(row.get("process_ids", []), stat_embeddings_map, stat_feature_dim)
+        _graph_stat_feature_vector(
+            row.get("process_ids", []),
+            stat_embeddings_map,
+            stat_feature_dim,
+            row.get("process_stat_overrides"),
+        )
         for row in rows
     ]
     return np.asarray(matrix, dtype=np.float64)
@@ -838,8 +888,9 @@ def _component_children_map(component: dict[str, Any]) -> dict[str, list[str]]:
     for edge in component.get("edges", []):
         if not isinstance(edge, (list, tuple)) or len(edge) < 2:
             continue
-        child = str(edge[0])
-        parent = str(edge[1])
+        # Vendor task components store process edges as [parent, child].
+        parent = str(edge[0])
+        child = str(edge[1])
         children_map.setdefault(parent, []).append(child)
     for parent in list(children_map):
         children_map[parent] = sorted({str(child) for child in children_map[parent]})
@@ -1211,11 +1262,13 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
     vendor = _load_vendor_module("tapas_vendor_darpa_exact_module1", _vendor_tapas_root() / "darpa.py")
     vendor.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ground_truth = _load_ground_truth(cfg.task_ground_truth_path)
+    theia_e5_entity_types = _load_theia_e5_ground_truth_entity_types(cfg.task_ground_truth_path) if cfg.host == "theia_e5" else {}
     task_component_kwargs = {
         "child_threshold": int(cfg.task_component_child_threshold),
         "split_mode": str(cfg.task_component_split_mode),
         "count_segmented_children_upstream": bool(cfg.task_component_count_segmented_children_upstream),
     }
+    use_release_legacy_cut = bool(cfg.task_tapas_release_legacy_cut_logic)
 
     with _temporary_cwd(workspace):
         source_logs = _normalize_tc3_source_logs(cfg.source_logs)
@@ -1223,12 +1276,15 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
         if cfg.host == "cadets":
             subject_list, object_list, event_count, parser_metadata = vendor.parser_cadets(source_logs)
             subject_node = vendor.encode_cadets(subject_list, object_list, event_count)
-            edge_list = vendor.cut_task(subject_list, return_task_components=True, **task_component_kwargs)
+            if use_release_legacy_cut:
+                edge_list = vendor.cut_task(subject_list, use_release_legacy=True)
+            else:
+                edge_list = vendor.cut_task(subject_list, return_task_components=True, **task_component_kwargs)
             raw_vectors = vendor.get_node_vec(subject_node)
         elif cfg.host == "fivedirections":
             subject_list, object_list, event_count, parser_metadata = vendor.parser_fivedirections(source_logs)
             subject_node = vendor.encode_fivedirections(subject_list, object_list, event_count)
-            edge_list = vendor.cut_task(subject_list, **task_component_kwargs)
+            edge_list = vendor.cut_task(subject_list, return_task_components=True, **task_component_kwargs)
             raw_vectors = vendor.get_node_vec(subject_node)
         elif cfg.host == "trace":
             subject_list, object_list, event_count, parser_metadata = vendor.parser_trace(source_logs)
@@ -1243,9 +1299,42 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
                     max_span_minutes=int(cfg.task_component_theia_max_span_minutes),
                     branch_gap_minutes=int(cfg.task_component_theia_branch_gap_minutes),
                 )
+        elif cfg.host == "theia_e5":
+            direct_subject_ground_truth = {
+                uuid
+                for uuid, entity_type in theia_e5_entity_types.items()
+                if entity_type == "subject"
+            }
+            object_ground_truth = {
+                uuid
+                for uuid, entity_type in theia_e5_entity_types.items()
+                if entity_type in {"file", "netflow"}
+            }
+            edge_list, raw_vectors = vendor.filters_theia_e5(
+                source_logs,
+                return_task_components=True,
+                ground_truth_object_uuids=object_ground_truth,
+                **task_component_kwargs,
+            )
+            parser_metadata = copy.deepcopy(edge_list.get("parser_metadata", {}))
+            ground_truth = direct_subject_ground_truth
         else:
             edge_list, raw_vectors = vendor.filters(source_logs, **task_component_kwargs)
-        canonical_ground_truth = _canonicalize_ground_truth_nodes(ground_truth, parser_metadata)
+    canonical_ground_truth = _canonicalize_ground_truth_nodes(ground_truth, parser_metadata)
+    if cfg.host == "theia_e5":
+        object_linked_ground_truth = {
+            str(node).strip()
+            for node in parser_metadata.get("gt_object_event_canonical_subjects", [])
+            if str(node).strip()
+        }
+        parser_metadata["ground_truth_entity_type_counts"] = {
+            entity_type: sum(1 for value in theia_e5_entity_types.values() if value == entity_type)
+            for entity_type in sorted(set(theia_e5_entity_types.values()))
+        }
+        parser_metadata["direct_subject_ground_truth_canonical_count"] = len(canonical_ground_truth)
+        parser_metadata["object_linked_ground_truth_canonical_count"] = len(object_linked_ground_truth)
+        canonical_ground_truth |= object_linked_ground_truth
+        parser_metadata["combined_ground_truth_canonical_count"] = len(canonical_ground_truth)
         raw_graphs = vendor.decompose(edge_list, raw_vectors, cfg.host, canonical_ground_truth=canonical_ground_truth)
 
     embeddings_map = _vector_rows_to_map(raw_vectors)
@@ -1263,6 +1352,7 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
         "selected_embeddings": embeddings_map,
         "sequence_feature_dim": _feature_dim_from_map(embeddings_map),
         "thread_merge_metadata": copy.deepcopy(parser_metadata),
+        "parser_event_count": event_count if cfg.use_ocr_stat_features else None,
         "theia_temporal_split_summary": copy.deepcopy(edge_list.get("theia_temporal_split_summary", {}))
         if isinstance(edge_list, dict)
         else {},
@@ -1352,12 +1442,22 @@ def _build_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
 def _extract_stat_embeddings_for_graphs(
     cfg: FusionConfig,
     graph_metas: list[dict[str, Any]],
+    parser_event_count: dict[object, object] | None = None,
+    parser_metadata: dict[str, object] | None = None,
 ) -> tuple[dict[str, list[float]], list[str]]:
     process_ids = {str(node) for meta in graph_metas for node in meta.get("node_ids", [])}
     if not process_ids:
         return {}, []
 
-    stats_df = extract_process_stat_features(cfg, process_ids)
+    if cfg.dataset_family == "tc3" and parser_event_count is not None:
+        stats_df = extract_process_stat_features_from_tc3_event_count(
+            cfg,
+            process_ids,
+            parser_event_count,
+            parser_metadata,
+        )
+    else:
+        stats_df = extract_process_stat_features(cfg, process_ids)
     stat_columns = [column for column in stats_df.columns if column != "process_id"]
     if not stat_columns:
         return {}, []
@@ -1436,10 +1536,12 @@ def _apply_graphsage_feature_policy(
 
 
 def _append_stats_to_bundle(cfg: FusionConfig, bundle: dict[str, Any]) -> dict[str, Any]:
-    updated = copy.deepcopy(bundle)
+    updated = dict(bundle)
     updated["base_sequence_feature_dim"] = int(bundle["sequence_feature_dim"]) if cfg.use_sequence_embeddings else 0
     updated["stat_feature_columns"] = []
     updated["selected_stat_embeddings"] = {}
+    parser_event_count = updated.pop("parser_event_count", None)
+    parser_metadata_for_stats = updated.get("thread_merge_metadata", {})
     if not cfg.use_sequence_embeddings:
         if updated["family"] == "tc3":
             updated["selected_embeddings"] = {}
@@ -1453,6 +1555,8 @@ def _append_stats_to_bundle(cfg: FusionConfig, bundle: dict[str, Any]) -> dict[s
         stat_embeddings, stat_columns = _extract_stat_embeddings_for_graphs(
             cfg,
             updated["selected_graph_metas"],
+            parser_event_count=parser_event_count if isinstance(parser_event_count, dict) else None,
+            parser_metadata=parser_metadata_for_stats if isinstance(parser_metadata_for_stats, dict) else None,
         )
         embeddings, graphs, base_dim = _apply_graphsage_feature_policy(
             cfg,
@@ -1703,30 +1807,56 @@ def _split_graphs_with_metas(
     unique_labels, label_counts = np.unique(labels, return_counts=True) if len(labels) else (np.asarray([]), np.asarray([]))
     stratified = bool(len(unique_labels) >= 2 and int(label_counts.min()) >= 2 and count >= 3)
 
+    requested_strategy = str(getattr(cfg, "task_fit_split_strategy", "stratified_shuffle_split"))
+    fallback_reason = ""
+
     if count <= 1:
         train_indices = list(range(count))
         eval_indices: list[int] = []
         split_mode = "degenerate_all_train"
-    elif stratified:
-        splitter = StratifiedShuffleSplit(
-            n_splits=1,
-            test_size=float(test_fraction),
-            random_state=int(cfg.random_seed),
-        )
-        train_idx, eval_idx = next(splitter.split(np.zeros((count, 1)), labels))
-        train_indices = [int(index) for index in train_idx.tolist()]
-        eval_indices = [int(index) for index in eval_idx.tolist()]
-        split_mode = "stratified_shuffle_split"
     else:
-        rng = random.Random(int(cfg.random_seed))
-        indices = list(range(count))
-        rng.shuffle(indices)
-        eval_count = max(1, int(round(count * float(test_fraction))))
-        if eval_count >= count:
-            eval_count = max(0, count - 1)
-        eval_indices = sorted(indices[:eval_count])
-        train_indices = sorted(indices[eval_count:]) if eval_count > 0 else sorted(indices)
-        split_mode = "random_shuffle_fallback"
+        can_use_kfold = (
+            requested_strategy == "stratified_kfold"
+            and stratified
+            and count >= int(cfg.task_fit_kfold_splits)
+            and int(label_counts.min()) >= int(cfg.task_fit_kfold_splits)
+        )
+        if can_use_kfold:
+            splitter = StratifiedKFold(
+                n_splits=int(cfg.task_fit_kfold_splits),
+                shuffle=True,
+                random_state=int(cfg.random_seed),
+            )
+            fold_splits = list(splitter.split(np.zeros((count, 1)), labels))
+            fold_index = int(cfg.task_fit_kfold_index) % len(fold_splits)
+            train_idx, eval_idx = fold_splits[fold_index]
+            train_indices = [int(index) for index in train_idx.tolist()]
+            eval_indices = [int(index) for index in eval_idx.tolist()]
+            split_mode = "stratified_kfold"
+        elif stratified:
+            if requested_strategy == "stratified_kfold":
+                fallback_reason = "kfold_not_feasible_for_class_counts_or_task_count"
+            splitter = StratifiedShuffleSplit(
+                n_splits=1,
+                test_size=float(test_fraction),
+                random_state=int(cfg.random_seed),
+            )
+            train_idx, eval_idx = next(splitter.split(np.zeros((count, 1)), labels))
+            train_indices = [int(index) for index in train_idx.tolist()]
+            eval_indices = [int(index) for index in eval_idx.tolist()]
+            split_mode = "stratified_shuffle_split"
+        else:
+            if requested_strategy == "stratified_kfold":
+                fallback_reason = "kfold_requires_stratifiable_labels"
+            rng = random.Random(int(cfg.random_seed))
+            indices = list(range(count))
+            rng.shuffle(indices)
+            eval_count = max(1, int(round(count * float(test_fraction))))
+            if eval_count >= count:
+                eval_count = max(0, count - 1)
+            eval_indices = sorted(indices[:eval_count])
+            train_indices = sorted(indices[eval_count:]) if eval_count > 0 else sorted(indices)
+            split_mode = "random_shuffle_fallback"
 
     train_graphs = [copy.deepcopy(graphs[index]) for index in train_indices]
     train_graph_metas = [copy.deepcopy(graph_metas[index]) for index in train_indices]
@@ -1735,9 +1865,13 @@ def _split_graphs_with_metas(
 
     return {
         "mode": split_mode,
+        "requested_strategy": requested_strategy,
         "stratified": stratified,
         "seed": int(cfg.random_seed),
         "test_fraction": float(test_fraction),
+        "kfold_splits": int(cfg.task_fit_kfold_splits),
+        "kfold_index": int(cfg.task_fit_kfold_index),
+        "fallback_reason": fallback_reason,
         "raw_task_count": int(count),
         "raw_positive_count": int(labels.sum()) if len(labels) else 0,
         "raw_negative_count": int(count - labels.sum()) if len(labels) else 0,
@@ -1804,6 +1938,7 @@ def _predict_rows(
                         "task_size": int(graph_meta.get("task_size", len(graph.get("nodes", [])))),
                         "internal_edge_count": int(graph_meta.get("internal_edge_count", len(graph.get("edges", [])))),
                         "process_ids": [str(node) for node in graph_meta.get("node_ids", [])],
+                        "process_stat_overrides": copy.deepcopy(graph_meta.get("process_stat_overrides", {})),
                     }
                 )
                 labels.append(label)
@@ -1848,6 +1983,131 @@ def _augment_graph_metas(
     return augmented
 
 
+def _normalize_stat_vector(values: Sequence[Any], stat_feature_dim: int) -> list[float]:
+    vector = [float(value) for value in values[:stat_feature_dim]]
+    if len(vector) < stat_feature_dim:
+        vector.extend([0.0] * (stat_feature_dim - len(vector)))
+    return vector
+
+
+def _collect_benign_stat_prototypes(
+    graph_metas: Sequence[dict[str, Any]],
+    stat_embeddings_map: dict[str, list[float]],
+    stat_feature_dim: int,
+    *,
+    limit: int = 10,
+) -> list[list[float]]:
+    if stat_feature_dim <= 0 or not stat_embeddings_map:
+        return []
+    prototypes: list[list[float]] = []
+    seen: set[tuple[float, ...]] = set()
+    for meta in graph_metas:
+        if int(meta.get("label", 0)) != 0:
+            continue
+        for process_id in meta.get("node_ids", []):
+            raw = stat_embeddings_map.get(str(process_id))
+            if not raw:
+                continue
+            vector = _normalize_stat_vector(raw, stat_feature_dim)
+            if not any(abs(value) > 1e-12 for value in vector):
+                continue
+            key = tuple(round(value, 12) for value in vector)
+            if key in seen:
+                continue
+            seen.add(key)
+            prototypes.append(vector)
+            if len(prototypes) >= limit:
+                return prototypes
+    if prototypes:
+        return prototypes
+    fallback_ids = sorted(stat_embeddings_map.keys())[:limit]
+    return [
+        _normalize_stat_vector(stat_embeddings_map[process_id], stat_feature_dim)
+        for process_id in fallback_ids
+    ]
+
+
+def _augment_positive_graph_with_stat_overrides(
+    vendor: ModuleType,
+    graph: dict[str, Any],
+    graph_meta: dict[str, Any],
+    dataset_name: str,
+    *,
+    needadd: int,
+    base_feature_dim: int,
+    stat_feature_dim: int,
+    benign_stat_prototypes: Sequence[Sequence[float]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if needadd <= 0:
+        return [], []
+
+    if graph.get("nodes"):
+        graph_has_embedded_stats = len(graph["nodes"][0]) > base_feature_dim
+        if graph_has_embedded_stats:
+            seq_nodes = [list(node[:base_feature_dim]) for node in graph["nodes"]]
+            stat_suffix = [
+                _normalize_stat_vector(node[base_feature_dim:], stat_feature_dim)
+                for node in graph["nodes"]
+            ]
+        else:
+            seq_nodes = [list(node[:base_feature_dim]) for node in graph["nodes"]]
+            stat_suffix = [[0.0] * stat_feature_dim for _ in graph["nodes"]]
+    else:
+        graph_has_embedded_stats = False
+        seq_nodes = []
+        stat_suffix = []
+
+    augmented_seq_nodes = vendor.dataenhance(
+        copy.deepcopy(seq_nodes),
+        needadd,
+        dataset_name,
+        return_metadata=True,
+    )
+    augmented_graphs: list[dict[str, Any]] = []
+    augmented_metas: list[dict[str, Any]] = []
+    node_ids = [str(node) for node in graph_meta.get("node_ids", [])]
+
+    for aug_index, seq_variant_info in enumerate(augmented_seq_nodes):
+        seq_variant = copy.deepcopy(seq_variant_info.get("nodes", []))
+        replaced_index = int(seq_variant_info.get("replaced_index", -1))
+        merged_graph = copy.deepcopy(graph)
+        stat_variant = copy.deepcopy(stat_suffix)
+        process_stat_overrides: dict[str, list[float]] = {}
+
+        if (
+            0 <= replaced_index < len(node_ids)
+            and stat_feature_dim > 0
+            and benign_stat_prototypes
+            and replaced_index < len(stat_variant)
+        ):
+            chosen_stats = _normalize_stat_vector(
+                benign_stat_prototypes[random.randrange(len(benign_stat_prototypes))],
+                stat_feature_dim,
+            )
+            stat_variant[replaced_index] = chosen_stats
+            process_stat_overrides[node_ids[replaced_index]] = chosen_stats
+
+        if graph_has_embedded_stats and stat_feature_dim > 0 and len(stat_variant) == len(seq_variant):
+            merged_graph["nodes"] = [
+                [float(value) for value in seq_variant[idx][:base_feature_dim]] + list(stat_variant[idx])
+                for idx in range(len(seq_variant))
+            ]
+        else:
+            merged_graph["nodes"] = [
+                [float(value) for value in node[:base_feature_dim]]
+                for node in seq_variant
+            ]
+        augmented_graphs.append(merged_graph)
+
+        merged_meta = copy.deepcopy(graph_meta)
+        merged_meta["task_id"] = f"{graph_meta.get('task_id', 'task')}_aug{aug_index + 1:03d}"
+        if process_stat_overrides:
+            merged_meta["process_stat_overrides"] = process_stat_overrides
+        augmented_metas.append(merged_meta)
+
+    return augmented_graphs, augmented_metas
+
+
 def _tc3_trace_augmentation_bonus(cfg: FusionConfig) -> int:
     if cfg.dataset_family == "tc3" and cfg.host.lower() == "trace":
         return max(0, int(cfg.task_tapas_trace_augmentation_bonus))
@@ -1867,6 +2127,8 @@ def _augment_graphs_preserve_stats_tc3(
     graph_metas: list[dict[str, Any]],
     dataset_name: str,
     base_feature_dim: int,
+    stat_embeddings_map: dict[str, list[float]],
+    stat_feature_dim: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if base_feature_dim <= 0:
         return copy.deepcopy(graphs), copy.deepcopy(graph_metas)
@@ -1874,14 +2136,11 @@ def _augment_graphs_preserve_stats_tc3(
         return [], []
     divisor = _tc3_augmentation_divisor(cfg)
     trace_bonus = _tc3_trace_augmentation_bonus(cfg)
-    if not graphs[0].get("nodes") or len(graphs[0]["nodes"][0]) <= base_feature_dim:
-        if divisor <= 0:
-            return copy.deepcopy(graphs), copy.deepcopy(graph_metas)
-        return vendor.data_deal(copy.deepcopy(graphs), dataset_name, divisor=divisor, bonus=trace_bonus), _augment_graph_metas(
-            graph_metas,
-            divisor,
-            bonus=trace_bonus,
-        )
+    benign_stat_prototypes = _collect_benign_stat_prototypes(
+        graph_metas,
+        stat_embeddings_map,
+        stat_feature_dim,
+    )
 
     data_pro: list[dict[str, Any]] = []
     meta_pro: list[dict[str, Any]] = []
@@ -1893,19 +2152,18 @@ def _augment_graphs_preserve_stats_tc3(
             meta_pro.append(graph_meta)
             if needadd <= 0:
                 continue
-            seq_nodes = [list(node[:base_feature_dim]) for node in graph["nodes"]]
-            stat_suffix = [list(node[base_feature_dim:]) for node in graph["nodes"]]
-            augmented_seq_nodes = vendor.dataenhance(copy.deepcopy(seq_nodes), needadd, dataset_name)
-            for aug_index, seq_variant in enumerate(augmented_seq_nodes):
-                merged_graph = copy.deepcopy(graph)
-                merged_graph["nodes"] = [
-                    [float(value) for value in seq_variant[idx][:base_feature_dim]] + list(stat_suffix[idx])
-                    for idx in range(len(seq_variant))
-                ]
-                data_pro.append(merged_graph)
-                merged_meta = copy.deepcopy(graph_meta)
-                merged_meta["task_id"] = f"{graph_meta.get('task_id', 'task')}_aug{aug_index + 1:03d}"
-                meta_pro.append(merged_meta)
+            augmented_graphs, augmented_metas = _augment_positive_graph_with_stat_overrides(
+                vendor,
+                graph,
+                graph_meta,
+                dataset_name,
+                needadd=needadd,
+                base_feature_dim=base_feature_dim,
+                stat_feature_dim=stat_feature_dim,
+                benign_stat_prototypes=benign_stat_prototypes,
+            )
+            data_pro.extend(augmented_graphs)
+            meta_pro.extend(augmented_metas)
         else:
             data_pro.append(graph)
             meta_pro.append(graph_meta)
@@ -1980,6 +2238,8 @@ def _train_tc3_exact(
                 copy.deepcopy(raw_split["train_graph_metas"]),
                 bundle["dataset_name"],
                 base_feature_dim,
+                bundle.get("selected_stat_embeddings", {}),
+                len(bundle.get("stat_feature_columns", [])),
             )
             eval_graphs = copy.deepcopy(raw_split["eval_graphs"])
             eval_graph_metas = copy.deepcopy(raw_split["eval_graph_metas"])
@@ -1993,6 +2253,8 @@ def _train_tc3_exact(
                 base_graph_metas,
                 bundle["dataset_name"],
                 base_feature_dim,
+                bundle.get("selected_stat_embeddings", {}),
+                len(bundle.get("stat_feature_columns", [])),
             )
             augmented_split = _split_graphs_with_metas(cfg, augmented_graphs, augmented_graph_metas)
             final_train_graphs = copy.deepcopy(augmented_split["train_graphs"])

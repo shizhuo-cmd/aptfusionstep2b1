@@ -724,6 +724,24 @@ def _select_family_preserved_paths(paths: list[CandidatePath], limit: int) -> li
     return selected[: max(1, limit)]
 
 
+def _select_risk_top_k_paths(paths: list[CandidatePath], limit: int) -> list[CandidatePath]:
+    ordered = sorted(
+        paths,
+        key=lambda path: (-float(path.risk_score), path.path_id),
+    )
+    selected: list[CandidatePath] = []
+    seen_keys: set[tuple[str, ...]] = set()
+    for path in ordered:
+        key = tuple(path.process_chain) + tuple(path.family_tags)
+        if key in seen_keys:
+            continue
+        selected.append(path)
+        seen_keys.add(key)
+        if len(selected) >= max(1, limit):
+            break
+    return selected[: max(1, limit)]
+
+
 def _augment_candidate_support(
     path: CandidatePath,
     process_states: dict[str, ProcessState],
@@ -1052,7 +1070,7 @@ def run_module5_paths(cfg: FusionConfig) -> Dict[str, str]:
             object_versions = _load_object_versions(Path(str(row.get("object_versions_path", "")).strip()))
             provenance_records = _load_label_provenance(Path(str(row.get("label_provenance_path", "")).strip()))
             retained_events = load_jsonl(Path(str(row.get("retained_events_path", "")).strip()))
-            if parent_id:
+            if parent_id and bool(getattr(cfg, "path_split_parent_label_inheritance_enabled", True)):
                 _inherit_parent_split_labels(
                     task_id,
                     process_states,
@@ -1099,7 +1117,10 @@ def run_module5_paths(cfg: FusionConfig) -> Dict[str, str]:
                         _annotate_path_families(cfg, precursor_rescue, process_states, object_states, retained_events)
                         paths.append(precursor_rescue)
             final_limit = max(1, int(getattr(cfg, "path_top_k", 20) or 20))
-            paths = _select_family_preserved_paths(paths, final_limit)
+            if bool(getattr(cfg, "path_family_preserve_enabled", True)):
+                paths = _select_family_preserved_paths(paths, final_limit)
+            else:
+                paths = _select_risk_top_k_paths(paths, final_limit)
             for index, path in enumerate(paths, start=1):
                 path.path_id = f"{task_id}_path_{index:03d}"
             rerank_meta = _rerank_paths_with_provenance(paths, provenance_records, retained_events, rules)

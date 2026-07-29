@@ -38,6 +38,7 @@ class FusionConfig:
     task_detector_model_input: Path | None = None
     task_detector_model_output: Path | None = None
     task_ground_truth_path: Path | None = None
+    task_sequence_model_path: Path | None = None
     random_seed: int = 42
     task_classifier_hidden_dim: int = 64
     task_classifier_num_layers: int = 2
@@ -50,6 +51,9 @@ class FusionConfig:
     task_decision_threshold: float = 0.5
     task_decision_threshold_mode: str = "fixed"
     task_fit_test_fraction: float = 0.0
+    task_fit_split_strategy: str = "stratified_shuffle_split"
+    task_fit_kfold_splits: int = 5
+    task_fit_kfold_index: int = 0
     task_min_graph_nodes: int = 1
     task_graph_bidirectional_edges: bool = True
     task_graph_self_loops: bool = True
@@ -79,6 +83,7 @@ class FusionConfig:
     task_component_split_mode: str = "fanout"
     task_component_child_threshold: int = 2
     task_component_count_segmented_children_upstream: bool = False
+    task_tapas_release_legacy_cut_logic: bool = False
     task_component_theia_temporal_split_enabled: bool = False
     task_component_theia_max_span_minutes: int = 45
     task_component_theia_branch_gap_minutes: int = 10
@@ -189,6 +194,7 @@ def load_config(path: str | Path) -> FusionConfig:
         task_detector_model_input=_optional_path(_get(data, "task_detector_model_input", "")),
         task_detector_model_output=_optional_path(_get(data, "task_detector_model_output", "")),
         task_ground_truth_path=_optional_path(_get(data, "task_ground_truth_path", "")),
+        task_sequence_model_path=_optional_path(_get(data, "task_sequence_model_path", "")),
         random_seed=int(_get(data, "random_seed", 42)),
         task_classifier_hidden_dim=int(_get(data, "task_classifier_hidden_dim", 64)),
         task_classifier_num_layers=int(_get(data, "task_classifier_num_layers", 2)),
@@ -201,6 +207,9 @@ def load_config(path: str | Path) -> FusionConfig:
         task_decision_threshold=float(_get(data, "task_decision_threshold", 0.5)),
         task_decision_threshold_mode=str(_get(data, "task_decision_threshold_mode", "fixed")),
         task_fit_test_fraction=float(_get(data, "task_fit_test_fraction", 0.0)),
+        task_fit_split_strategy=str(_get(data, "task_fit_split_strategy", "stratified_shuffle_split")),
+        task_fit_kfold_splits=int(_get(data, "task_fit_kfold_splits", 5)),
+        task_fit_kfold_index=int(_get(data, "task_fit_kfold_index", 0)),
         task_min_graph_nodes=int(_get(data, "task_min_graph_nodes", 1)),
         task_graph_bidirectional_edges=bool(_get(data, "task_graph_bidirectional_edges", True)),
         task_graph_self_loops=bool(_get(data, "task_graph_self_loops", True)),
@@ -231,6 +240,9 @@ def load_config(path: str | Path) -> FusionConfig:
         task_component_child_threshold=int(_get(data, "task_component_child_threshold", 2)),
         task_component_count_segmented_children_upstream=bool(
             _get(data, "task_component_count_segmented_children_upstream", False)
+        ),
+        task_tapas_release_legacy_cut_logic=bool(
+            _get(data, "task_tapas_release_legacy_cut_logic", False)
         ),
         task_component_theia_temporal_split_enabled=bool(
             _get(data, "task_component_theia_temporal_split_enabled", False)
@@ -428,6 +440,19 @@ def _validate(cfg: FusionConfig) -> None:
 
     if not (0.0 <= cfg.task_fit_test_fraction < 1.0):
         raise ValueError("task_fit_test_fraction must be in [0, 1)")
+
+    allowed_task_fit_split_strategies = {"stratified_shuffle_split", "stratified_kfold"}
+    if cfg.task_fit_split_strategy not in allowed_task_fit_split_strategies:
+        raise ValueError(
+            "task_fit_split_strategy must be one of "
+            f"{sorted(allowed_task_fit_split_strategies)}"
+        )
+
+    if cfg.task_fit_kfold_splits < 2:
+        raise ValueError("task_fit_kfold_splits must be >= 2")
+
+    if cfg.task_fit_kfold_index < 0:
+        raise ValueError("task_fit_kfold_index must be >= 0")
 
     if cfg.task_min_graph_nodes <= 0:
         raise ValueError("task_min_graph_nodes must be > 0")

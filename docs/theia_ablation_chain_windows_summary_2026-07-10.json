@@ -1,0 +1,353 @@
+{
+  "code_versions_identical": true,
+  "source_files": {
+    "current_comparison": "D:\\daima\\APT-Fusionstep2b1\\debug\\remote_ops\\out\\theia_ablation_matrix_monitor_tmp\\current_comparison_20260710.json",
+    "old_comparison": "D:\\daima\\APT-Fusionstep2b1\\debug\\remote_ops\\out\\theia_ablation_matrix_monitor_tmp\\old_comparison_20260710.json",
+    "window_dir": "D:\\daima\\APT-Fusionstep2b1\\debug\\remote_ops\\out\\theia_ablation_matrix_monitor_tmp\\theia_window_files"
+  },
+  "chain_windows": [
+    "THEIA_20180410_1342_1342_02",
+    "THEIA_20180410_1341_1455_01",
+    "THEIA_20180412_1244_1326_03"
+  ],
+  "summary_rows": [
+    {
+      "variant_key": "baseline_current",
+      "variant": "Baseline",
+      "status": "ok",
+      "chain_window_count": 3,
+      "hit_window_count": 3,
+      "window_recall": 1.0,
+      "tactic_recall_macro": 0.6666666666666666,
+      "tactic_precision_macro": 0.7000000000000001,
+      "tactic_f1_macro": 0.6829268292682927,
+      "predicted_path_count": 126,
+      "predicted_path_with_report_count": 99,
+      "report_rate": 0.7857142857142857,
+      "official_off_window_high_risk_rate": 0.1595744680851064
+    },
+    {
+      "variant_key": "attack_prior_full",
+      "variant": "启用攻击先验",
+      "status": "ok",
+      "chain_window_count": 3,
+      "hit_window_count": 3,
+      "window_recall": 1.0,
+      "tactic_recall_macro": 0.7222222222222222,
+      "tactic_precision_macro": 0.7833333333333333,
+      "tactic_f1_macro": 0.7515375153751538,
+      "predicted_path_count": 126,
+      "predicted_path_with_report_count": 99,
+      "report_rate": 0.7857142857142857,
+      "official_off_window_high_risk_rate": 0.1595744680851064
+    },
+    {
+      "variant_key": "deterministic_mapping",
+      "variant": "确定性映射",
+      "status": "ok",
+      "chain_window_count": 3,
+      "hit_window_count": 3,
+      "window_recall": 1.0,
+      "tactic_recall_macro": 0.7222222222222222,
+      "tactic_precision_macro": 0.6666666666666666,
+      "tactic_f1_macro": 0.6933333333333334,
+      "predicted_path_count": 126,
+      "predicted_path_with_report_count": 99,
+      "report_rate": 0.7857142857142857,
+      "official_off_window_high_risk_rate": 0.1595744680851064
+    },
+    {
+      "variant_key": "no_claims_direct_mapping",
+      "variant": "关闭 Claims 直映射",
+      "status": "ok",
+      "chain_window_count": 3,
+      "hit_window_count": 3,
+      "window_recall": 1.0,
+      "tactic_recall_macro": 0.0,
+      "tactic_precision_macro": 0.0,
+      "tactic_f1_macro": 0.0,
+      "predicted_path_count": 126,
+      "predicted_path_with_report_count": 99,
+      "report_rate": 0.7857142857142857,
+      "official_off_window_high_risk_rate": 0.14893617021276595
+    },
+    {
+      "variant_key": "path_width_narrow",
+      "variant": "窄宽度",
+      "status": "ok",
+      "chain_window_count": 3,
+      "hit_window_count": 3,
+      "window_recall": 1.0,
+      "tactic_recall_macro": 0.6666666666666666,
+      "tactic_precision_macro": 0.7000000000000001,
+      "tactic_f1_macro": 0.6829268292682927,
+      "predicted_path_count": 114,
+      "predicted_path_with_report_count": 99,
+      "report_rate": 0.868421052631579,
+      "official_off_window_high_risk_rate": 0.1566265060240964
+    },
+    {
+      "variant_key": "path_width_wide",
+      "variant": "宽宽度",
+      "status": "ok",
+      "chain_window_count": 3,
+      "hit_window_count": 3,
+      "window_recall": 1.0,
+      "tactic_recall_macro": 0.6666666666666666,
+      "tactic_precision_macro": 0.7000000000000001,
+      "tactic_f1_macro": 0.6829268292682927,
+      "predicted_path_count": 130,
+      "predicted_path_with_report_count": 99,
+      "report_rate": 0.7615384615384615,
+      "official_off_window_high_risk_rate": 0.17346938775510204
+    },
+    {
+      "variant_key": "window_agg_top3",
+      "variant": "窗口聚合 Top-3",
+      "status": "ok",
+      "chain_window_count": 3,
+      "hit_window_count": 3,
+      "window_recall": 1.0,
+      "tactic_recall_macro": 0.611111111111111,
+      "tactic_precision_macro": 0.8666666666666667,
+      "tactic_f1_macro": 0.7167919799498745,
+      "predicted_path_count": 126,
+      "predicted_path_with_report_count": 99,
+      "report_rate": 0.7857142857142857,
+      "official_off_window_high_risk_rate": 0.1595744680851064
+    },
+    {
+      "variant_key": "window_agg_top8",
+      "variant": "窗口聚合 Top-8",
+      "status": "ok",
+      "chain_window_count": 3,
+      "hit_window_count": 3,
+      "window_recall": 1.0,
+      "tactic_recall_macro": 0.7777777777777777,
+      "tactic_precision_macro": 0.7555555555555555,
+      "tactic_f1_macro": 0.7665056360708534,
+      "predicted_path_count": 126,
+      "predicted_path_with_report_count": 99,
+      "report_rate": 0.7857142857142857,
+      "official_off_window_high_risk_rate": 0.1595744680851064
+    }
+  ],
+  "window_variant_rows": [
+    {
+      "variant_key": "baseline_current",
+      "variant": "Baseline",
+      "window_id": "THEIA_20180410_1342_1342_02",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, CREDENTIAL_ACCESS",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DEFENSE_EVASION, EXECUTION, CREDENTIAL_ACCESS",
+      "missed_tactics": "无",
+      "extra_tactics": "COMMAND_AND_CONTROL, DEFENSE_EVASION"
+    },
+    {
+      "variant_key": "baseline_current",
+      "variant": "Baseline",
+      "window_id": "THEIA_20180410_1341_1455_01",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "COMMAND_AND_CONTROL, DISCOVERY, CREDENTIAL_ACCESS, EXFILTRATION",
+      "missed_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "CREDENTIAL_ACCESS, EXFILTRATION"
+    },
+    {
+      "variant_key": "baseline_current",
+      "variant": "Baseline",
+      "window_id": "THEIA_20180412_1244_1326_03",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DISCOVERY, EXECUTION",
+      "missed_tactics": "PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "attack_prior_full",
+      "variant": "启用攻击先验",
+      "window_id": "THEIA_20180410_1342_1342_02",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, CREDENTIAL_ACCESS",
+      "predicted_tactics": "EXECUTION, INITIAL_ACCESS, COMMAND_AND_CONTROL, DEFENSE_EVASION, CREDENTIAL_ACCESS",
+      "missed_tactics": "无",
+      "extra_tactics": "COMMAND_AND_CONTROL, DEFENSE_EVASION"
+    },
+    {
+      "variant_key": "attack_prior_full",
+      "variant": "启用攻击先验",
+      "window_id": "THEIA_20180410_1341_1455_01",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "COMMAND_AND_CONTROL, INITIAL_ACCESS, DISCOVERY, EXFILTRATION",
+      "missed_tactics": "EXECUTION, PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "EXFILTRATION"
+    },
+    {
+      "variant_key": "attack_prior_full",
+      "variant": "启用攻击先验",
+      "window_id": "THEIA_20180412_1244_1326_03",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "EXECUTION, INITIAL_ACCESS, COMMAND_AND_CONTROL, DISCOVERY",
+      "missed_tactics": "PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "deterministic_mapping",
+      "variant": "确定性映射",
+      "window_id": "THEIA_20180410_1342_1342_02",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, CREDENTIAL_ACCESS",
+      "predicted_tactics": "EXECUTION, COMMAND_AND_CONTROL, INITIAL_ACCESS, DEFENSE_EVASION, CREDENTIAL_ACCESS, DISCOVERY",
+      "missed_tactics": "无",
+      "extra_tactics": "COMMAND_AND_CONTROL, DEFENSE_EVASION, DISCOVERY"
+    },
+    {
+      "variant_key": "deterministic_mapping",
+      "variant": "确定性映射",
+      "window_id": "THEIA_20180410_1341_1455_01",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DISCOVERY, CREDENTIAL_ACCESS, COLLECTION, EXFILTRATION",
+      "missed_tactics": "EXECUTION, PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "CREDENTIAL_ACCESS, COLLECTION, EXFILTRATION"
+    },
+    {
+      "variant_key": "deterministic_mapping",
+      "variant": "确定性映射",
+      "window_id": "THEIA_20180412_1244_1326_03",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "EXECUTION, COMMAND_AND_CONTROL, INITIAL_ACCESS, DISCOVERY",
+      "missed_tactics": "PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "no_claims_direct_mapping",
+      "variant": "关闭 Claims 直映射",
+      "window_id": "THEIA_20180410_1342_1342_02",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, CREDENTIAL_ACCESS",
+      "predicted_tactics": "无",
+      "missed_tactics": "INITIAL_ACCESS, EXECUTION, CREDENTIAL_ACCESS",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "no_claims_direct_mapping",
+      "variant": "关闭 Claims 直映射",
+      "window_id": "THEIA_20180410_1341_1455_01",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "无",
+      "missed_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "no_claims_direct_mapping",
+      "variant": "关闭 Claims 直映射",
+      "window_id": "THEIA_20180412_1244_1326_03",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "无",
+      "missed_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "path_width_narrow",
+      "variant": "窄宽度",
+      "window_id": "THEIA_20180410_1342_1342_02",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, CREDENTIAL_ACCESS",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DEFENSE_EVASION, EXECUTION, CREDENTIAL_ACCESS",
+      "missed_tactics": "无",
+      "extra_tactics": "COMMAND_AND_CONTROL, DEFENSE_EVASION"
+    },
+    {
+      "variant_key": "path_width_narrow",
+      "variant": "窄宽度",
+      "window_id": "THEIA_20180410_1341_1455_01",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "COMMAND_AND_CONTROL, DISCOVERY, CREDENTIAL_ACCESS, EXFILTRATION",
+      "missed_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "CREDENTIAL_ACCESS, EXFILTRATION"
+    },
+    {
+      "variant_key": "path_width_narrow",
+      "variant": "窄宽度",
+      "window_id": "THEIA_20180412_1244_1326_03",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DISCOVERY, EXECUTION",
+      "missed_tactics": "PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "path_width_wide",
+      "variant": "宽宽度",
+      "window_id": "THEIA_20180410_1342_1342_02",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, CREDENTIAL_ACCESS",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DEFENSE_EVASION, EXECUTION, CREDENTIAL_ACCESS",
+      "missed_tactics": "无",
+      "extra_tactics": "COMMAND_AND_CONTROL, DEFENSE_EVASION"
+    },
+    {
+      "variant_key": "path_width_wide",
+      "variant": "宽宽度",
+      "window_id": "THEIA_20180410_1341_1455_01",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "COMMAND_AND_CONTROL, DISCOVERY, CREDENTIAL_ACCESS, EXFILTRATION",
+      "missed_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "CREDENTIAL_ACCESS, EXFILTRATION"
+    },
+    {
+      "variant_key": "path_width_wide",
+      "variant": "宽宽度",
+      "window_id": "THEIA_20180412_1244_1326_03",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DISCOVERY, EXECUTION",
+      "missed_tactics": "PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "window_agg_top3",
+      "variant": "窗口聚合 Top-3",
+      "window_id": "THEIA_20180410_1342_1342_02",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, CREDENTIAL_ACCESS",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DEFENSE_EVASION, EXECUTION, CREDENTIAL_ACCESS",
+      "missed_tactics": "无",
+      "extra_tactics": "COMMAND_AND_CONTROL, DEFENSE_EVASION"
+    },
+    {
+      "variant_key": "window_agg_top3",
+      "variant": "窗口聚合 Top-3",
+      "window_id": "THEIA_20180410_1341_1455_01",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "COMMAND_AND_CONTROL, DISCOVERY",
+      "missed_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "window_agg_top3",
+      "variant": "窗口聚合 Top-3",
+      "window_id": "THEIA_20180412_1244_1326_03",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DISCOVERY",
+      "missed_tactics": "EXECUTION, PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    },
+    {
+      "variant_key": "window_agg_top8",
+      "variant": "窗口聚合 Top-8",
+      "window_id": "THEIA_20180410_1342_1342_02",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, CREDENTIAL_ACCESS",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DEFENSE_EVASION, EXECUTION, CREDENTIAL_ACCESS",
+      "missed_tactics": "无",
+      "extra_tactics": "COMMAND_AND_CONTROL, DEFENSE_EVASION"
+    },
+    {
+      "variant_key": "window_agg_top8",
+      "variant": "窗口聚合 Top-8",
+      "window_id": "THEIA_20180410_1341_1455_01",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "COMMAND_AND_CONTROL, DISCOVERY, CREDENTIAL_ACCESS, EXFILTRATION, INITIAL_ACCESS, EXECUTION",
+      "missed_tactics": "PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "CREDENTIAL_ACCESS, EXFILTRATION"
+    },
+    {
+      "variant_key": "window_agg_top8",
+      "variant": "窗口聚合 Top-8",
+      "window_id": "THEIA_20180412_1244_1326_03",
+      "gt_tactics": "INITIAL_ACCESS, EXECUTION, PRIVILEGE_ESCALATION, COMMAND_AND_CONTROL, DISCOVERY, DEFENSE_EVASION",
+      "predicted_tactics": "INITIAL_ACCESS, COMMAND_AND_CONTROL, DISCOVERY, EXECUTION",
+      "missed_tactics": "PRIVILEGE_ESCALATION, DEFENSE_EVASION",
+      "extra_tactics": "无"
+    }
+  ]
+}

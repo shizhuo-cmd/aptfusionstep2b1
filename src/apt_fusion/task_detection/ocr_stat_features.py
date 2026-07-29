@@ -295,6 +295,7 @@ def _record_process_event(
     action: str | None,
     timestamp_sec: float | None,
     target_process_ids: set[str] | None,
+    amount: float = 1.0,
 ) -> None:
     if action is None:
         return
@@ -304,14 +305,14 @@ def _record_process_event(
 
     if _allowed(source_id):
         row = process_rows.setdefault(source_id, _init_process_row(action_columns))
-        row[f"stat_out_{action}"] = float(row[f"stat_out_{action}"]) + 1.0
+        row[f"stat_out_{action}"] = float(row[f"stat_out_{action}"]) + float(amount)
         if timestamp_sec is not None:
             timestamps = row["_timestamps"]
             assert isinstance(timestamps, list)
             timestamps.append(timestamp_sec)
     if _allowed(dest_process_id):
         row = process_rows.setdefault(dest_process_id, _init_process_row(action_columns))
-        row[f"stat_in_{action}"] = float(row[f"stat_in_{action}"]) + 1.0
+        row[f"stat_in_{action}"] = float(row[f"stat_in_{action}"]) + float(amount)
         if timestamp_sec is not None:
             timestamps = row["_timestamps"]
             assert isinstance(timestamps, list)
@@ -367,6 +368,94 @@ def _finalize_rows(
         df[_TIME_FEATURES] = (time_matrix - minimum) / denom
 
     return df.fillna(0.0)
+
+
+_TC3_EVENT_ID_TO_ACTION = {
+    1: "accept",
+    2: "connect",
+    3: "execute",
+    4: "exit",
+    5: "read",
+    6: "recvfrom",
+    7: "recvmsg",
+    8: "sendto",
+    9: "sendmsg",
+    10: "write",
+    11: "create_object",
+}
+
+
+def extract_process_stat_features_from_tc3_event_count(
+    cfg: FusionConfig,
+    process_ids: Iterable[str],
+    event_count: dict[object, object],
+    parser_metadata: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    """Build TC3 stat features from TAPAS parser output instead of rescanning logs.
+
+    The TAPAS TC3 parsers already aggregate events as
+    ``(event_type_id, subject_uuid, object_uuid) -> count``.  For large hosts
+    such as FiveDirections, re-reading the raw JSON logs just to reconstruct
+    these counts is prohibitively expensive.  This helper consumes the parser
+    aggregate directly and applies the parser's canonical subject mapping before
+    updating process-level in/out action counters.
+    """
+
+    process_id_set = {str(process_id).strip() for process_id in process_ids if str(process_id).strip()}
+    action_columns = _ordered_action_columns(cfg.host)
+    allowed_actions = {column[len("stat_out_") :] for column in action_columns if column.startswith("stat_out_")}
+    process_rows: dict[str, dict[str, object]] = {}
+    if not process_id_set:
+        return _finalize_rows(process_rows, action_columns, process_id_set, cfg.ocr_stat_active_threshold_sec)
+
+    raw_to_canonical: dict[str, str] = {}
+    if isinstance(parser_metadata, dict):
+        mapping = parser_metadata.get("raw_subject_to_canonical_node")
+        if isinstance(mapping, dict):
+            raw_to_canonical = {str(key): str(value) for key, value in mapping.items()}
+
+    def _canonical(value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return raw_to_canonical.get(text, text)
+
+    for key, raw_count in event_count.items():
+        if not isinstance(key, tuple) or len(key) != 3:
+            continue
+        event_type, subject_id, object_id = key
+        try:
+            event_id = int(event_type)
+        except (TypeError, ValueError):
+            continue
+        action = _TC3_EVENT_ID_TO_ACTION.get(event_id)
+        action = _normalize_action(action, allowed_actions)
+        if action is None:
+            continue
+        try:
+            amount = float(raw_count)
+        except (TypeError, ValueError):
+            amount = 1.0
+        if amount <= 0.0:
+            continue
+        source_id = _canonical(subject_id)
+        dest_process_id = _canonical(object_id)
+        if dest_process_id not in process_id_set:
+            dest_process_id = None
+        _record_process_event(
+            process_rows,
+            action_columns,
+            source_id,
+            dest_process_id,
+            action,
+            timestamp_sec=None,
+            target_process_ids=process_id_set,
+            amount=amount,
+        )
+
+    return _finalize_rows(process_rows, action_columns, process_id_set, cfg.ocr_stat_active_threshold_sec)
 
 
 def _extract_tc3_stats(cfg: FusionConfig, process_ids: set[str]) -> pd.DataFrame:

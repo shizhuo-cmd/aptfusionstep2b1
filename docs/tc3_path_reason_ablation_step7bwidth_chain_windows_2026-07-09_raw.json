@@ -1,0 +1,1130 @@
+{
+  "generated_from": "D:\\daima\\APT-Fusionstep2b1\\debug\\remote_ops\\out\\tc3_path_reason_ablation_matrix_step7bwidth_module1gt_20260708_matrix_summary.remote.json",
+  "datasets": {
+    "trace": {
+      "chain_window_ids": [
+        "TRACE_20180413_1243_1253_04",
+        "TRACE_20180413_1350_1428_05"
+      ],
+      "variants": [
+        {
+          "variant": "baseline_current",
+          "variant_label": "Baseline",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 1,
+            "predicted_path_count": 44,
+            "predicted_path_with_report_count": 16,
+            "confirmed_window_recall": 0.5,
+            "strict_window_recall": 0.5,
+            "high_risk_window_recall": 0.5,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 0,
+            "off_window_high_risk_rate": 0.0,
+            "median_start_error_sec": 788.5,
+            "median_end_error_sec": 65.5,
+            "median_midpoint_error_sec": 427.0,
+            "mean_path_purity": 1.0,
+            "median_path_purity": 1.0,
+            "mean_window_split_factor": 10.75,
+            "median_window_split_factor": 10.0,
+            "p95_window_split_factor": 22.549999999999997,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.45,
+            "strict_tactic_precision_macro": 1.0,
+            "strict_tactic_precision_micro": 1.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 2,
+            "chain_window_recall": 1.0,
+            "chain_tactic_recall_macro": 0.9,
+            "chain_tactic_precision_macro": 1.0,
+            "predicted_path_count": 44,
+            "predicted_path_with_report_count": 16
+          },
+          "window_rows": [
+            {
+              "window_id": "TRACE_20180413_1243_1253_04",
+              "best_path_id": "task_0345_path_001",
+              "matched_path_ids": [
+                "task_0345_path_001",
+                "task_0345_path_002",
+                "task_0345_path_003",
+                "task_0345_path_004",
+                "task_0345_path_005"
+              ],
+              "strict_tactic_recall": 1.0,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DEFENSE_EVASION",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DEFENSE_EVASION",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "missed_tactics": [],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "TRACE_20180413_1350_1428_05",
+              "best_path_id": "task_0557_path_001",
+              "matched_path_ids": [
+                "task_0557_path_001",
+                "task_0557_path_002",
+                "task_0558_path_001",
+                "task_0558_path_002",
+                "task_0558_path_003"
+              ],
+              "strict_tactic_recall": 0.8,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "COLLECTION"
+              ],
+              "predicted_tactics": [
+                "INITIAL_ACCESS",
+                "COMMAND_AND_CONTROL",
+                "EXECUTION",
+                "DISCOVERY"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "missed_tactics": [
+                "COLLECTION"
+              ],
+              "extra_tactics": []
+            }
+          ]
+        },
+        {
+          "variant": "split_parent_inherit_off",
+          "variant_label": "2.1 Parent Inheritance Off",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 1,
+            "predicted_path_count": 36,
+            "predicted_path_with_report_count": 12,
+            "confirmed_window_recall": 0.5,
+            "strict_window_recall": 0.5,
+            "high_risk_window_recall": 0.5,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 0,
+            "off_window_high_risk_rate": 0.0,
+            "median_start_error_sec": 788.5,
+            "median_end_error_sec": 65.5,
+            "median_midpoint_error_sec": 427.0,
+            "mean_path_purity": 1.0,
+            "median_path_purity": 1.0,
+            "mean_window_split_factor": 8.75,
+            "median_window_split_factor": 7.5,
+            "p95_window_split_factor": 19.25,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.45,
+            "strict_tactic_precision_macro": 1.0,
+            "strict_tactic_precision_micro": 1.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 2,
+            "chain_window_recall": 1.0,
+            "chain_tactic_recall_macro": 0.9,
+            "chain_tactic_precision_macro": 1.0,
+            "predicted_path_count": 36,
+            "predicted_path_with_report_count": 12
+          },
+          "window_rows": [
+            {
+              "window_id": "TRACE_20180413_1243_1253_04",
+              "best_path_id": "task_0345_path_001",
+              "matched_path_ids": [
+                "task_0345_path_001",
+                "task_0345_path_002",
+                "task_0345_path_003",
+                "task_0345_path_004",
+                "task_0345_path_005"
+              ],
+              "strict_tactic_recall": 1.0,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DEFENSE_EVASION",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DEFENSE_EVASION",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "missed_tactics": [],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "TRACE_20180413_1350_1428_05",
+              "best_path_id": "task_0557_path_001",
+              "matched_path_ids": [
+                "task_0557_path_001",
+                "task_0557_path_002",
+                "task_0557_path_003",
+                "task_0557_path_004",
+                "task_0558_path_001"
+              ],
+              "strict_tactic_recall": 0.8,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "COLLECTION"
+              ],
+              "predicted_tactics": [
+                "INITIAL_ACCESS",
+                "COMMAND_AND_CONTROL",
+                "EXECUTION",
+                "DISCOVERY"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "missed_tactics": [
+                "COLLECTION"
+              ],
+              "extra_tactics": []
+            }
+          ]
+        },
+        {
+          "variant": "family_preserve_off_risk_topk",
+          "variant_label": "2.2 Family Preserve Off / Risk Top-k",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 1,
+            "predicted_path_count": 44,
+            "predicted_path_with_report_count": 16,
+            "confirmed_window_recall": 0.5,
+            "strict_window_recall": 0.5,
+            "high_risk_window_recall": 0.5,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 0,
+            "off_window_high_risk_rate": 0.0,
+            "median_start_error_sec": 788.5,
+            "median_end_error_sec": 65.5,
+            "median_midpoint_error_sec": 427.0,
+            "mean_path_purity": 1.0,
+            "median_path_purity": 1.0,
+            "mean_window_split_factor": 10.75,
+            "median_window_split_factor": 10.0,
+            "p95_window_split_factor": 22.549999999999997,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.45,
+            "strict_tactic_precision_macro": 1.0,
+            "strict_tactic_precision_micro": 1.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 2,
+            "chain_window_recall": 1.0,
+            "chain_tactic_recall_macro": 0.9,
+            "chain_tactic_precision_macro": 1.0,
+            "predicted_path_count": 44,
+            "predicted_path_with_report_count": 16
+          },
+          "window_rows": [
+            {
+              "window_id": "TRACE_20180413_1243_1253_04",
+              "best_path_id": "task_0345_path_001",
+              "matched_path_ids": [
+                "task_0345_path_001",
+                "task_0345_path_002",
+                "task_0345_path_003",
+                "task_0345_path_004",
+                "task_0345_path_005"
+              ],
+              "strict_tactic_recall": 1.0,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DEFENSE_EVASION",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DEFENSE_EVASION",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "missed_tactics": [],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "TRACE_20180413_1350_1428_05",
+              "best_path_id": "task_0557_path_001",
+              "matched_path_ids": [
+                "task_0557_path_001",
+                "task_0557_path_002",
+                "task_0558_path_001",
+                "task_0558_path_002",
+                "task_0558_path_003"
+              ],
+              "strict_tactic_recall": 0.8,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "COLLECTION"
+              ],
+              "predicted_tactics": [
+                "INITIAL_ACCESS",
+                "COMMAND_AND_CONTROL",
+                "EXECUTION",
+                "DISCOVERY"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "missed_tactics": [
+                "COLLECTION"
+              ],
+              "extra_tactics": []
+            }
+          ]
+        },
+        {
+          "variant": "attack_prior_full",
+          "variant_label": "2.3 Attack Prior On",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 1,
+            "predicted_path_count": 0,
+            "predicted_path_with_report_count": 0,
+            "confirmed_window_recall": 0.0,
+            "strict_window_recall": 0.0,
+            "high_risk_window_recall": 0.0,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 0,
+            "off_window_high_risk_rate": 0.0,
+            "median_start_error_sec": 0.0,
+            "median_end_error_sec": 0.0,
+            "median_midpoint_error_sec": 0.0,
+            "mean_path_purity": 0.0,
+            "median_path_purity": 0.0,
+            "mean_window_split_factor": 0.0,
+            "median_window_split_factor": 0.0,
+            "p95_window_split_factor": 0.0,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.0,
+            "strict_tactic_precision_macro": 0.0,
+            "strict_tactic_precision_micro": 0.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 0,
+            "chain_window_recall": 0.0,
+            "chain_tactic_recall_macro": 0.0,
+            "chain_tactic_precision_macro": 0.0,
+            "predicted_path_count": 0,
+            "predicted_path_with_report_count": 0
+          },
+          "window_rows": [
+            {
+              "window_id": "TRACE_20180413_1243_1253_04",
+              "best_path_id": "",
+              "matched_path_ids": [],
+              "strict_tactic_recall": 0.0,
+              "strict_tactic_precision": 0.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [],
+              "matched_tactics": [],
+              "missed_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "TRACE_20180413_1350_1428_05",
+              "best_path_id": "",
+              "matched_path_ids": [],
+              "strict_tactic_recall": 0.0,
+              "strict_tactic_precision": 0.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "COLLECTION"
+              ],
+              "predicted_tactics": [],
+              "matched_tactics": [],
+              "missed_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "COLLECTION"
+              ],
+              "extra_tactics": []
+            }
+          ]
+        },
+        {
+          "variant": "deterministic_mapping",
+          "variant_label": "2.4 Deterministic Mapping",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 1,
+            "predicted_path_count": 0,
+            "predicted_path_with_report_count": 0,
+            "confirmed_window_recall": 0.0,
+            "strict_window_recall": 0.0,
+            "high_risk_window_recall": 0.0,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 0,
+            "off_window_high_risk_rate": 0.0,
+            "median_start_error_sec": 0.0,
+            "median_end_error_sec": 0.0,
+            "median_midpoint_error_sec": 0.0,
+            "mean_path_purity": 0.0,
+            "median_path_purity": 0.0,
+            "mean_window_split_factor": 0.0,
+            "median_window_split_factor": 0.0,
+            "p95_window_split_factor": 0.0,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.0,
+            "strict_tactic_precision_macro": 0.0,
+            "strict_tactic_precision_micro": 0.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 0,
+            "chain_window_recall": 0.0,
+            "chain_tactic_recall_macro": 0.0,
+            "chain_tactic_precision_macro": 0.0,
+            "predicted_path_count": 0,
+            "predicted_path_with_report_count": 0
+          },
+          "window_rows": [
+            {
+              "window_id": "TRACE_20180413_1243_1253_04",
+              "best_path_id": "",
+              "matched_path_ids": [],
+              "strict_tactic_recall": 0.0,
+              "strict_tactic_precision": 0.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [],
+              "matched_tactics": [],
+              "missed_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "TRACE_20180413_1350_1428_05",
+              "best_path_id": "",
+              "matched_path_ids": [],
+              "strict_tactic_recall": 0.0,
+              "strict_tactic_precision": 0.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "COLLECTION"
+              ],
+              "predicted_tactics": [],
+              "matched_tactics": [],
+              "missed_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "COLLECTION"
+              ],
+              "extra_tactics": []
+            }
+          ]
+        }
+      ]
+    },
+    "cadets": {
+      "chain_window_ids": [
+        "CADETS_20180412_1400_1438_03",
+        "CADETS_20180413_0904_0915_04"
+      ],
+      "variants": [
+        {
+          "variant": "baseline_current",
+          "variant_label": "Baseline",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 0,
+            "predicted_path_count": 80,
+            "predicted_path_with_report_count": 20,
+            "confirmed_window_recall": 0.5,
+            "strict_window_recall": 0.5,
+            "high_risk_window_recall": 0.5,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 75,
+            "off_window_high_risk_rate": 0.9375,
+            "median_start_error_sec": 980.0,
+            "median_end_error_sec": 582.5,
+            "median_midpoint_error_sec": 245.25,
+            "mean_path_purity": 1.0,
+            "median_path_purity": 1.0,
+            "mean_window_split_factor": 1.25,
+            "median_window_split_factor": 0.5,
+            "p95_window_split_factor": 3.549999999999999,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.41666666666666663,
+            "strict_tactic_precision_macro": 1.0,
+            "strict_tactic_precision_micro": 1.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 2,
+            "chain_window_recall": 1.0,
+            "chain_tactic_recall_macro": 0.8333333333333333,
+            "chain_tactic_precision_macro": 1.0,
+            "predicted_path_count": 80,
+            "predicted_path_with_report_count": 20
+          },
+          "window_rows": [
+            {
+              "window_id": "CADETS_20180412_1400_1438_03",
+              "best_path_id": "task_0013_path_002",
+              "matched_path_ids": [
+                "task_0013_path_002"
+              ],
+              "strict_tactic_recall": 0.6666666666666666,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [
+                "COMMAND_AND_CONTROL",
+                "PRIVILEGE_ESCALATION",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "EXECUTION",
+                "INITIAL_ACCESS",
+                "PRIVILEGE_ESCALATION"
+              ],
+              "missed_tactics": [
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "CADETS_20180413_0904_0915_04",
+              "best_path_id": "task_1021_path_009",
+              "matched_path_ids": [
+                "task_1021_path_001",
+                "task_1021_path_003",
+                "task_1021_path_009",
+                "task_1021_path_011"
+              ],
+              "strict_tactic_recall": 1.0,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY"
+              ],
+              "predicted_tactics": [
+                "COMMAND_AND_CONTROL",
+                "INITIAL_ACCESS",
+                "PRIVILEGE_ESCALATION",
+                "EXECUTION",
+                "DISCOVERY"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS",
+                "PRIVILEGE_ESCALATION"
+              ],
+              "missed_tactics": [],
+              "extra_tactics": []
+            }
+          ]
+        },
+        {
+          "variant": "split_parent_inherit_off",
+          "variant_label": "2.1 Parent Inheritance Off",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 0,
+            "predicted_path_count": 80,
+            "predicted_path_with_report_count": 20,
+            "confirmed_window_recall": 0.5,
+            "strict_window_recall": 0.5,
+            "high_risk_window_recall": 0.5,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 75,
+            "off_window_high_risk_rate": 0.9375,
+            "median_start_error_sec": 980.0,
+            "median_end_error_sec": 582.5,
+            "median_midpoint_error_sec": 245.25,
+            "mean_path_purity": 1.0,
+            "median_path_purity": 1.0,
+            "mean_window_split_factor": 1.25,
+            "median_window_split_factor": 0.5,
+            "p95_window_split_factor": 3.549999999999999,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.41666666666666663,
+            "strict_tactic_precision_macro": 1.0,
+            "strict_tactic_precision_micro": 1.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 2,
+            "chain_window_recall": 1.0,
+            "chain_tactic_recall_macro": 0.8333333333333333,
+            "chain_tactic_precision_macro": 1.0,
+            "predicted_path_count": 80,
+            "predicted_path_with_report_count": 20
+          },
+          "window_rows": [
+            {
+              "window_id": "CADETS_20180412_1400_1438_03",
+              "best_path_id": "task_0013_path_002",
+              "matched_path_ids": [
+                "task_0013_path_002"
+              ],
+              "strict_tactic_recall": 0.6666666666666666,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [
+                "COMMAND_AND_CONTROL",
+                "PRIVILEGE_ESCALATION",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "EXECUTION",
+                "INITIAL_ACCESS",
+                "PRIVILEGE_ESCALATION"
+              ],
+              "missed_tactics": [
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "CADETS_20180413_0904_0915_04",
+              "best_path_id": "task_1021_path_009",
+              "matched_path_ids": [
+                "task_1021_path_001",
+                "task_1021_path_003",
+                "task_1021_path_009",
+                "task_1021_path_011"
+              ],
+              "strict_tactic_recall": 1.0,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY"
+              ],
+              "predicted_tactics": [
+                "COMMAND_AND_CONTROL",
+                "INITIAL_ACCESS",
+                "PRIVILEGE_ESCALATION",
+                "EXECUTION",
+                "DISCOVERY"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS",
+                "PRIVILEGE_ESCALATION"
+              ],
+              "missed_tactics": [],
+              "extra_tactics": []
+            }
+          ]
+        },
+        {
+          "variant": "family_preserve_off_risk_topk",
+          "variant_label": "2.2 Family Preserve Off / Risk Top-k",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 0,
+            "predicted_path_count": 80,
+            "predicted_path_with_report_count": 20,
+            "confirmed_window_recall": 0.5,
+            "strict_window_recall": 0.5,
+            "high_risk_window_recall": 0.5,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 75,
+            "off_window_high_risk_rate": 0.9375,
+            "median_start_error_sec": 980.0,
+            "median_end_error_sec": 582.5,
+            "median_midpoint_error_sec": 245.25,
+            "mean_path_purity": 1.0,
+            "median_path_purity": 1.0,
+            "mean_window_split_factor": 1.25,
+            "median_window_split_factor": 0.5,
+            "p95_window_split_factor": 3.549999999999999,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.41666666666666663,
+            "strict_tactic_precision_macro": 1.0,
+            "strict_tactic_precision_micro": 1.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 2,
+            "chain_window_recall": 1.0,
+            "chain_tactic_recall_macro": 0.8333333333333333,
+            "chain_tactic_precision_macro": 1.0,
+            "predicted_path_count": 80,
+            "predicted_path_with_report_count": 20
+          },
+          "window_rows": [
+            {
+              "window_id": "CADETS_20180412_1400_1438_03",
+              "best_path_id": "task_0013_path_001",
+              "matched_path_ids": [
+                "task_0013_path_001"
+              ],
+              "strict_tactic_recall": 0.6666666666666666,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [
+                "COMMAND_AND_CONTROL",
+                "PRIVILEGE_ESCALATION",
+                "EXECUTION",
+                "INITIAL_ACCESS"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "EXECUTION",
+                "INITIAL_ACCESS",
+                "PRIVILEGE_ESCALATION"
+              ],
+              "missed_tactics": [
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "CADETS_20180413_0904_0915_04",
+              "best_path_id": "task_1021_path_009",
+              "matched_path_ids": [
+                "task_1021_path_001",
+                "task_1021_path_002",
+                "task_1021_path_009",
+                "task_1021_path_011"
+              ],
+              "strict_tactic_recall": 1.0,
+              "strict_tactic_precision": 1.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY"
+              ],
+              "predicted_tactics": [
+                "COMMAND_AND_CONTROL",
+                "EXECUTION",
+                "DISCOVERY",
+                "INITIAL_ACCESS",
+                "PRIVILEGE_ESCALATION"
+              ],
+              "matched_tactics": [
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "EXECUTION",
+                "INITIAL_ACCESS",
+                "PRIVILEGE_ESCALATION"
+              ],
+              "missed_tactics": [],
+              "extra_tactics": []
+            }
+          ]
+        },
+        {
+          "variant": "attack_prior_full",
+          "variant_label": "2.3 Attack Prior On",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 0,
+            "predicted_path_count": 0,
+            "predicted_path_with_report_count": 0,
+            "confirmed_window_recall": 0.0,
+            "strict_window_recall": 0.0,
+            "high_risk_window_recall": 0.0,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 0,
+            "off_window_high_risk_rate": 0.0,
+            "median_start_error_sec": 0.0,
+            "median_end_error_sec": 0.0,
+            "median_midpoint_error_sec": 0.0,
+            "mean_path_purity": 0.0,
+            "median_path_purity": 0.0,
+            "mean_window_split_factor": 0.0,
+            "median_window_split_factor": 0.0,
+            "p95_window_split_factor": 0.0,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.0,
+            "strict_tactic_precision_macro": 0.0,
+            "strict_tactic_precision_micro": 0.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 0,
+            "chain_window_recall": 0.0,
+            "chain_tactic_recall_macro": 0.0,
+            "chain_tactic_precision_macro": 0.0,
+            "predicted_path_count": 0,
+            "predicted_path_with_report_count": 0
+          },
+          "window_rows": [
+            {
+              "window_id": "CADETS_20180412_1400_1438_03",
+              "best_path_id": "",
+              "matched_path_ids": [],
+              "strict_tactic_recall": 0.0,
+              "strict_tactic_precision": 0.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [],
+              "matched_tactics": [],
+              "missed_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "CADETS_20180413_0904_0915_04",
+              "best_path_id": "",
+              "matched_path_ids": [],
+              "strict_tactic_recall": 0.0,
+              "strict_tactic_precision": 0.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY"
+              ],
+              "predicted_tactics": [],
+              "matched_tactics": [],
+              "missed_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY"
+              ],
+              "extra_tactics": []
+            }
+          ]
+        },
+        {
+          "variant": "deterministic_mapping",
+          "variant_label": "2.4 Deterministic Mapping",
+          "status": "ok",
+          "overall_metrics": {
+            "confirmed_window_count": 4,
+            "attempt_window_count": 0,
+            "predicted_path_count": 0,
+            "predicted_path_with_report_count": 0,
+            "confirmed_window_recall": 0.0,
+            "strict_window_recall": 0.0,
+            "high_risk_window_recall": 0.0,
+            "attempt_window_flag_rate": 0.0,
+            "off_window_high_risk_count": 0,
+            "off_window_high_risk_rate": 0.0,
+            "median_start_error_sec": 0.0,
+            "median_end_error_sec": 0.0,
+            "median_midpoint_error_sec": 0.0,
+            "mean_path_purity": 0.0,
+            "median_path_purity": 0.0,
+            "mean_window_split_factor": 0.0,
+            "median_window_split_factor": 0.0,
+            "p95_window_split_factor": 0.0,
+            "strict_technique_recall_macro": 0.0,
+            "strict_technique_recall_micro": 0.0,
+            "strict_technique_precision_macro": 0.0,
+            "strict_technique_precision_micro": 0.0,
+            "strict_tactic_recall_macro": 0.0,
+            "strict_tactic_precision_macro": 0.0,
+            "strict_tactic_precision_micro": 0.0,
+            "broad_technique_recall_macro": 0.0,
+            "window_full_coverage_rate": 0.0,
+            "window_pad_before_minutes": 5,
+            "window_pad_after_minutes": 5,
+            "near_miss_minutes": 5,
+            "matched_path_top_n": 5
+          },
+          "chain_window_metrics": {
+            "chain_window_count": 2,
+            "chain_window_hit_count": 0,
+            "chain_window_recall": 0.0,
+            "chain_tactic_recall_macro": 0.0,
+            "chain_tactic_precision_macro": 0.0,
+            "predicted_path_count": 0,
+            "predicted_path_with_report_count": 0
+          },
+          "window_rows": [
+            {
+              "window_id": "CADETS_20180412_1400_1438_03",
+              "best_path_id": "",
+              "matched_path_ids": [],
+              "strict_tactic_recall": 0.0,
+              "strict_tactic_precision": 0.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "predicted_tactics": [],
+              "matched_tactics": [],
+              "missed_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY",
+                "DEFENSE_EVASION"
+              ],
+              "extra_tactics": []
+            },
+            {
+              "window_id": "CADETS_20180413_0904_0915_04",
+              "best_path_id": "",
+              "matched_path_ids": [],
+              "strict_tactic_recall": 0.0,
+              "strict_tactic_precision": 0.0,
+              "gt_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY"
+              ],
+              "predicted_tactics": [],
+              "matched_tactics": [],
+              "missed_tactics": [
+                "INITIAL_ACCESS",
+                "EXECUTION",
+                "PRIVILEGE_ESCALATION",
+                "COMMAND_AND_CONTROL",
+                "DISCOVERY"
+              ],
+              "extra_tactics": []
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

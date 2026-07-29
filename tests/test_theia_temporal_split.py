@@ -13,28 +13,31 @@ if str(SRC_ROOT) not in sys.path:
 pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")
 
-from apt_fusion.task_detection.tapas_native_backend import _apply_theia_temporal_split
+from apt_fusion.task_detection.tapas_native_backend import (
+    _apply_theia_temporal_split,
+    _maybe_temporally_split_theia_component,
+)
 
 
 def test_theia_temporal_split_breaks_apart_wide_root_component() -> None:
     edge_list = {
         "edge_list": [
-            ["B", "A"],
-            ["D", "B"],
-            ["C", "A"],
-            ["E", "C"],
-            ["F", "C"],
+            ["A", "B"],
+            ["B", "D"],
+            ["A", "C"],
+            ["C", "E"],
+            ["C", "F"],
         ],
         "task_components": [
             {
                 "task_root": "A",
                 "nodes": ["A", "B", "C", "D", "E", "F"],
                 "edges": [
-                    ["B", "A"],
-                    ["D", "B"],
-                    ["C", "A"],
-                    ["E", "C"],
-                    ["F", "C"],
+                    ["A", "B"],
+                    ["B", "D"],
+                    ["A", "C"],
+                    ["C", "E"],
+                    ["C", "F"],
                 ],
                 "boundary_nodes": [],
             }
@@ -65,3 +68,37 @@ def test_theia_temporal_split_breaks_apart_wide_root_component() -> None:
     assert all(component.get("temporal_split_applied") for component in components)
     assert {component["task_root"] for component in components} == {"B", "C"}
     assert all("A" not in component["nodes"] for component in components)
+
+
+def test_theia_temporal_split_sees_direct_children_with_parent_to_child_edges() -> None:
+    component = {
+        "task_root": "A",
+        "nodes": ["A", "B", "C", "D", "E", "F"],
+        "edges": [
+            ["A", "B"],
+            ["B", "D"],
+            ["A", "C"],
+            ["C", "E"],
+            ["C", "F"],
+        ],
+        "boundary_nodes": [],
+    }
+    subject_time_ranges = {
+        "A": {"first_timestamp_sec": 0.0, "last_timestamp_sec": 7200.0, "event_count": 10},
+        "B": {"first_timestamp_sec": 0.0, "last_timestamp_sec": 60.0, "event_count": 2},
+        "D": {"first_timestamp_sec": 120.0, "last_timestamp_sec": 240.0, "event_count": 3},
+        "C": {"first_timestamp_sec": 4200.0, "last_timestamp_sec": 4260.0, "event_count": 2},
+        "E": {"first_timestamp_sec": 4320.0, "last_timestamp_sec": 4380.0, "event_count": 3},
+        "F": {"first_timestamp_sec": 4440.0, "last_timestamp_sec": 4500.0, "event_count": 3},
+    }
+
+    split_components, summary = _maybe_temporally_split_theia_component(
+        component,
+        subject_time_ranges,
+        max_span_minutes=45,
+        branch_gap_minutes=10,
+    )
+
+    assert summary["reason"] == "gap_cluster_split"
+    assert summary["applied"] is True
+    assert len(split_components) == 2

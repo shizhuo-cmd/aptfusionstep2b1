@@ -45,6 +45,52 @@ def _subject_tgid(subject_data):
     return str(value).strip()
 
 
+_CDM_ZERO_UUID = "00000000-0000-0000-0000-000000000000"
+
+
+def _unwrap_avro_scalar(value):
+    """Return a scalar from JSON emitted for an Avro union value."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if not isinstance(value, dict):
+        return value
+    for key in ("string", "int", "long", "double", "float", "boolean", "bytes"):
+        if key in value:
+            return _unwrap_avro_scalar(value[key])
+    if len(value) == 1:
+        return _unwrap_avro_scalar(next(iter(value.values())))
+    return None
+
+
+def _cdm_uuid(value):
+    """Read UUIDs from CDM18/19/20 JSON without hard-coding a namespace."""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict):
+        return None
+    for key, nested in value.items():
+        if key == "UUID" or key.endswith(".UUID"):
+            scalar = _unwrap_avro_scalar(nested)
+            return str(scalar) if scalar is not None else None
+    scalar = _unwrap_avro_scalar(value)
+    return str(scalar) if scalar is not None else None
+
+
+def _cdm_datum_payload(record, record_name):
+    """Find a datum by its short CDM record name across schema versions."""
+    datum = record.get("datum", {}) if isinstance(record, dict) else {}
+    if not isinstance(datum, dict):
+        return None
+    for key, payload in datum.items():
+        if key == record_name or key.endswith("." + record_name):
+            return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _is_zero_uuid(value):
+    return str(value or "").strip().upper() == _CDM_ZERO_UUID
+
+
 def _resolve_thread_subject_owners(subject_rows):
     subject_info = {
         str(row["uuid"]): dict(row)
@@ -69,10 +115,13 @@ def _resolve_thread_subject_owners(subject_rows):
         row = subject_info[subject_uuid]
         owner = subject_uuid
         parent_uuid = str(row.get("parentuuid", "Unknow"))
+        subject_type = str(row.get("subject_type", "")).strip().upper()
         subject_tgid = str(row.get("tgid", "")).strip()
         if parent_uuid in subject_info:
             parent_tgid = str(subject_info[parent_uuid].get("tgid", "")).strip()
-            if subject_tgid and parent_tgid and subject_tgid == parent_tgid:
+            if subject_type == "SUBJECT_THREAD":
+                owner = resolve_owner(parent_uuid, trail)
+            elif subject_tgid and parent_tgid and subject_tgid == parent_tgid:
                 owner = resolve_owner(parent_uuid, trail)
         trail.remove(subject_uuid)
         owner_cache[subject_uuid] = owner
@@ -173,6 +222,7 @@ def parser_cadets(data_path):
                             "parentuuid": str(parentuuid),
                             "process_id": pid,
                             "tgid": _subject_tgid(data),
+                            "subject_type": str(data.get("type", "")),
                         }
                     )
                 elif "com.bbn.tc.schema.avro.cdm18.FileObject" in event["datum"]:
@@ -189,6 +239,7 @@ def parser_cadets(data_path):
     for i in range(len(object_list)):
         if object_list[i][0] == '2':
             object_list[i].append(file_path[object_list[i][1]] if object_list[i][1] in file_path else 'Unknow')
+
     owner_by_uuid, process_parent_by_owner = _resolve_thread_subject_owners(subject_rows)
     canonical_subject_list = []
     seen_subjects = set()
@@ -213,6 +264,7 @@ def parser_cadets(data_path):
         "thread_subject_count": int(sum(1 for raw_uuid, owner_uuid in owner_by_uuid.items() if raw_uuid != owner_uuid)),
         "process_subject_count": int(len(canonical_subject_list)),
     }
+    metadata["graph_identity_mode"] = "uuid"
     return canonical_subject_list, object_list, event_count, metadata
 
 
@@ -271,6 +323,7 @@ def parser_fivedirections(data_path):
                             "parentuuid": str(parentuuid),
                             "process_id": pid,
                             "tgid": _subject_tgid(data),
+                            "subject_type": str(data.get("type", "")),
                         }
                     )
                 elif "com.bbn.tc.schema.avro.cdm18.FileObject" in event["datum"]:
@@ -959,13 +1012,385 @@ def filters(
         }, subjhisvec
     return chi_pa, subjhisvec
 
+
+def filters_theia_e5(
+        data_path,
+        return_task_components=False,
+        child_threshold=2,
+        split_mode="fanout",
+        count_segmented_children_upstream=False,
+        ground_truth_object_uuids=None,
+        return_sequence_histories=False,
+):
+    """Build THEIA E5 process tasks from CDM20 JSON.
+
+    E5 keeps the TC3 event/object layout but changes the Avro namespace to
+    cdm20 and represents unknown parents with the all-zero UUID.  Keeping this
+    parser separate protects the historical TC3 THEIA path from format drift.
+    """
+    syspathdict = load_fix('./data/linux_system_path.txt')
+    filetypedict = load_fix('./data/linux_file_type.txt')
+    aimevetype = {
+        'EVENT_ACCEPT': 1,
+        'EVENT_CONNECT': 2,
+        'EVENT_EXECUTE': 3,
+        'EVENT_EXIT': 4,
+        'EVENT_READ': 5,
+        'EVENT_RECVFROM': 6,
+        'EVENT_RECVMSG': 7,
+        'EVENT_SENDTO': 8,
+        'EVENT_SENDMSG': 9,
+        'EVENT_WRITE': 10,
+    }
+    data_list = sorted(
+        filename
+        for filename in os.listdir(data_path)
+        if os.path.isfile(os.path.join(data_path, filename))
+    )
+    events_seen = {}
+    objvec = {}
+    raw_subject_time_ranges = {}
+    raw_subject_to_canonical = {}
+    raw_subject_rows = {}
+    raw_subject_order = []
+    canonical_subjects = {}
+    canonical_order = []
+    alias_key_to_subject = {}
+    event_type_counts = collections.Counter()
+    parser_counts = collections.Counter()
+    gt_object_uuids = {
+        str(value).strip()
+        for value in (ground_truth_object_uuids or [])
+        if str(value).strip()
+    }
+    gt_object_event_subjects = {object_uuid: set() for object_uuid in gt_object_uuids}
+    gt_object_event_counts = collections.Counter()
+    gt_object_event_types = {object_uuid: collections.Counter() for object_uuid in gt_object_uuids}
+
+    for filename in tqdm(data_list, desc="Parsing THEIA E5", unit="file"):
+        path = os.path.join(data_path, filename)
+        with open(path, 'r', encoding='utf-8') as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    parser_counts['malformed_json_lines'] += 1
+                    continue
+
+                event_data = _cdm_datum_payload(record, 'Event')
+                if event_data is not None:
+                    event_type = str(event_data.get('type', 'EVENT_OTHER'))
+                    event_type_counts[event_type] += 1
+                    raw_subject = _cdm_uuid(event_data.get('subject'))
+                    timestamp_sec = _event_timestamp_seconds(event_data)
+                    _update_subject_time_range(raw_subject_time_ranges, raw_subject, timestamp_sec)
+                    event_objects = {
+                        str(value).strip().upper()
+                        for value in (
+                            _cdm_uuid(event_data.get('predicateObject')),
+                            _cdm_uuid(event_data.get('predicateObject2')),
+                        )
+                        if value
+                    }
+                    for gt_object_uuid in event_objects & gt_object_uuids:
+                        if raw_subject and not _is_zero_uuid(raw_subject):
+                            gt_object_event_subjects[gt_object_uuid].add(raw_subject)
+                            gt_object_event_counts[gt_object_uuid] += 1
+                            gt_object_event_types[gt_object_uuid][event_type] += 1
+                    if event_type not in aimevetype:
+                        continue
+                    object_uuid = _cdm_uuid(event_data.get('predicateObject'))
+                    if not raw_subject or not object_uuid or _is_zero_uuid(raw_subject):
+                        parser_counts['selected_events_missing_subject_or_object'] += 1
+                        continue
+                    key = (aimevetype[event_type], raw_subject, object_uuid)
+                    events_seen[key] = events_seen.get(key, 0) + 1
+                    continue
+
+                subject_data = _cdm_datum_payload(record, 'Subject')
+                if subject_data is not None:
+                    raw_subject = _cdm_uuid(subject_data.get('uuid'))
+                    if not raw_subject or _is_zero_uuid(raw_subject):
+                        parser_counts['zero_or_missing_subject_records'] += 1
+                        continue
+                    raw_parent = _cdm_uuid(subject_data.get('parentSubject'))
+                    if not raw_parent or _is_zero_uuid(raw_parent):
+                        raw_parent = 'Unknow'
+                        parser_counts['root_subject_records'] += 1
+                    props = _subject_properties_map(subject_data)
+                    if raw_subject not in raw_subject_rows:
+                        raw_subject_order.append(raw_subject)
+                    raw_subject_rows[raw_subject] = {
+                        'uuid': raw_subject,
+                        'parentuuid': raw_parent,
+                        'tgid': str(props.get('tgid', '')).strip(),
+                        'subpath': str(props.get('path') or _unwrap_avro_scalar(subject_data.get('cmdLine')) or 'Unknown'),
+                        'process_id': str(_unwrap_avro_scalar(subject_data.get('cid')) or '0'),
+                        'subject_type': str(subject_data.get('type', '')),
+                    }
+                    continue
+
+                file_data = _cdm_datum_payload(record, 'FileObject')
+                if file_data is not None:
+                    object_uuid = _cdm_uuid(file_data.get('uuid'))
+                    if not object_uuid:
+                        parser_counts['file_records_missing_uuid'] += 1
+                        continue
+                    base_object = file_data.get('baseObject')
+                    properties = base_object.get('properties') if isinstance(base_object, dict) else {}
+                    prop_map = properties.get('map', {}) if isinstance(properties, dict) else {}
+                    if not isinstance(prop_map, dict):
+                        prop_map = {}
+                    filename_value = prop_map.get('filename') or prop_map.get('path')
+                    filename = str(filename_value) if filename_value else 'Unknown'
+                    dev_value = prop_map.get('dev')
+                    dev = str(dev_value) if dev_value is not None else 'Unknown'
+                    max_length = 0
+                    subpath_vec = 90
+                    for match in syspathdict:
+                        if filename.startswith(match) and len(match) > max_length:
+                            max_length = len(match)
+                            subpath_vec = int(syspathdict[match]) + 1
+                    filetype_vec = 0
+                    if filename != 'Unknown':
+                        last_part = filename.rsplit('/', 1)[-1]
+                        if 'python' not in last_part and '.' in last_part:
+                            extension = last_part.split('.', 1)[-1]
+                            if 'so' in extension:
+                                extension = 'so'
+                            if '.' in extension:
+                                extension = last_part.rsplit('.', 1)[-1]
+                            if extension in filetypedict:
+                                filetype_vec = int(filetypedict[extension]) + 1
+                    if (
+                        len(dev) > 5
+                        or 'Unknown' in dev
+                        or '/' in dev
+                        or 'con' in dev
+                        or 'Empty' in dev
+                        or 'Labs' in dev
+                        or 'with' in dev
+                    ):
+                        dev_vec = '0'
+                    else:
+                        dev_vec = dev
+                    objvec[object_uuid] = ['2', str(subpath_vec), str(filetype_vec), str(dev_vec)]
+                    continue
+
+                netflow_data = _cdm_datum_payload(record, 'NetFlowObject')
+                if netflow_data is not None:
+                    object_uuid = _cdm_uuid(netflow_data.get('uuid'))
+                    if not object_uuid:
+                        parser_counts['netflow_records_missing_uuid'] += 1
+                        continue
+                    local_address = _unwrap_avro_scalar(netflow_data.get('localAddress')) or 'unknown'
+                    remote_address = _unwrap_avro_scalar(netflow_data.get('remoteAddress')) or 'unknown'
+                    local_port = _unwrap_avro_scalar(netflow_data.get('localPort'))
+                    remote_port = _unwrap_avro_scalar(netflow_data.get('remotePort'))
+                    local_port = str(local_port if local_port is not None else 1024)
+                    remote_port = str(remote_port if remote_port is not None else 1024)
+                    objvec[object_uuid] = [
+                        '3',
+                        str(compare_address(str(local_address), str(remote_address))),
+                        str(getportcode(local_port)),
+                        str(getportcode(remote_port)),
+                    ]
+
+    # Apply the TAPAS thread rule before process-graph construction.  A child
+    # Subject with the same tgid as its parent is represented by that parent's
+    # process node; all of its later events are remapped to the same owner.
+    owner_by_uuid, process_parent_by_owner = _resolve_thread_subject_owners(
+        list(raw_subject_rows.values())
+    )
+    owner_to_canonical = {}
+    for raw_subject in raw_subject_order:
+        owner_subject = owner_by_uuid.get(raw_subject, raw_subject)
+        if owner_subject != raw_subject:
+            parser_counts['thread_subjects_merged_by_tgid'] += 1
+            continue
+        row = raw_subject_rows.get(owner_subject)
+        if row is None:
+            continue
+        parent_owner = process_parent_by_owner.get(owner_subject, 'Unknow')
+        canonical_parent = owner_to_canonical.get(parent_owner, parent_owner)
+        alias_key = (canonical_parent, row.get('tgid', ''), row.get('subpath', 'Unknown'))
+        canonical_subject = alias_key_to_subject.get(alias_key)
+        if canonical_subject is None:
+            canonical_subject = owner_subject
+            alias_key_to_subject[alias_key] = canonical_subject
+            canonical_order.append(canonical_subject)
+            canonical_subjects[canonical_subject] = {
+                'parent_raw': parent_owner,
+                'process_id': row.get('process_id', '0'),
+                'subject_type': row.get('subject_type', ''),
+            }
+        else:
+            parser_counts['same_parent_tgid_path_aliases'] += 1
+        owner_to_canonical[owner_subject] = canonical_subject
+
+    for raw_subject in raw_subject_order:
+        owner_subject = owner_by_uuid.get(raw_subject, raw_subject)
+        raw_subject_to_canonical[raw_subject] = owner_to_canonical.get(owner_subject, owner_subject)
+
+    gt_object_event_canonical_subjects = sorted({
+        raw_subject_to_canonical.get(raw_subject, raw_subject)
+        for subjects in gt_object_event_subjects.values()
+        for raw_subject in subjects
+        if raw_subject_to_canonical.get(raw_subject, raw_subject)
+    })
+
+    subject_list = []
+    for canonical_subject in canonical_order:
+        row = canonical_subjects[canonical_subject]
+        parent_raw = row.get('parent_raw', 'Unknow')
+        parent_owner = owner_by_uuid.get(parent_raw, parent_raw)
+        canonical_parent = owner_to_canonical.get(parent_owner, parent_owner)
+        if canonical_parent == canonical_subject or _is_zero_uuid(canonical_parent):
+            canonical_parent = 'Unknow'
+        subject_list.append(['1', canonical_subject, canonical_parent, row.get('process_id', '0')])
+
+    padict, chdict = _normalize_task_maps(subject_list)
+    segmented = set()
+    task_components = None
+    task_component_diagnostics = []
+    if return_task_components:
+        segmented = _resolve_segmented_nodes(
+            padict,
+            chdict,
+            child_threshold=child_threshold,
+            split_mode=split_mode,
+            count_segmented_children_upstream=count_segmented_children_upstream,
+        )
+        task_components = _build_task_components(padict, chdict, segmented, split_mode=split_mode)
+        task_component_diagnostics = _build_task_component_diagnostics(
+            padict,
+            chdict,
+            task_components,
+            segmented,
+            child_threshold=child_threshold,
+            split_mode=split_mode,
+            count_segmented_children_upstream=count_segmented_children_upstream,
+        )
+
+    canonical_event_count = _remap_event_subjects(events_seen, raw_subject_to_canonical)
+    subjhistory = {}
+    for event, count in canonical_event_count.items():
+        if event[2] not in objvec:
+            parser_counts['selected_events_without_supported_object'] += int(count)
+            continue
+        subjhistory.setdefault(event[1], []).append([str(event[0]), str(count)] + objvec[event[2]])
+
+    if return_sequence_histories:
+        # The offline TAPAS objective consumes each process history directly:
+        # x[t] predicts the event vector x[t + 1] for the same process.
+        return subjhistory, {
+            'raw_subject_count': int(len(raw_subject_rows)),
+            'canonical_process_subject_count': int(len(subject_list)),
+            'active_sequence_subject_count': int(len(subjhistory)),
+            'event_type_counts': dict(event_type_counts),
+            'parser_counts': {key: int(value) for key, value in parser_counts.items()},
+        }
+
+    lstm_model = LSTM(6, 256, 6)
+    lstm_model.load_state_dict(torch.load('./model/stackedlstm_tc.pt', map_location=device))
+    lstm_model.to(device)
+    lstm_model.eval()
+    subjhisvec = {}
+
+    def _e5_numeric_feature(value):
+        """Normalize CDM20 scalar fields, including hexadecimal device values."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            try:
+                return float(int(str(value).strip(), 0))
+            except (TypeError, ValueError):
+                parser_counts['non_numeric_sequence_features'] += 1
+                return 0.0
+
+    with torch.no_grad():
+        for subject_uuid, history in tqdm(subjhistory.items(), desc="Getting E5 node vector", unit="node"):
+            values = [[_e5_numeric_feature(value) for value in event] for event in history]
+            if not values:
+                subjhisvec[subject_uuid] = [0.0] * 42
+                continue
+            tensor = torch.tensor(np.array([values]), dtype=torch.float32).to(device)
+            subjhisvec[subject_uuid] = torch.Tensor.tolist(lstm_model(tensor))
+
+    canonical_time_ranges = {}
+    for raw_subject, value in raw_subject_time_ranges.items():
+        canonical_subject = raw_subject_to_canonical.get(raw_subject, raw_subject)
+        if _is_zero_uuid(canonical_subject):
+            continue
+        current = canonical_time_ranges.get(canonical_subject)
+        if current is None:
+            canonical_time_ranges[canonical_subject] = list(value)
+        else:
+            current[0] = min(current[0], value[0])
+            current[1] = max(current[1], value[1])
+            current[2] += int(value[2])
+
+    edge_rows = []
+    for parent, children in padict.items():
+        for child in children:
+            if child != 'Unknow':
+                edge_rows.append([str(parent), str(child)])
+    if return_task_components:
+        return {
+            'edge_list': edge_rows,
+            'task_components': task_components or [],
+            'segmented_nodes': sorted(segmented),
+            'child_threshold': int(child_threshold),
+            'split_mode': str(split_mode),
+            'count_segmented_children_upstream': bool(count_segmented_children_upstream),
+            'task_component_diagnostics': task_component_diagnostics,
+            'subject_time_ranges': {
+                str(subject_uuid): {
+                    'first_timestamp_sec': float(value[0]),
+                    'last_timestamp_sec': float(value[1]),
+                    'event_count': int(value[2]),
+                }
+                for subject_uuid, value in canonical_time_ranges.items()
+            },
+            'parser_metadata': {
+                'format': 'theia_e5_cdm20',
+                'raw_subject_to_canonical_node': raw_subject_to_canonical,
+                'raw_subject_count': int(len(raw_subject_rows)),
+                'canonical_process_subject_count': int(len(subject_list)),
+                'event_type_counts': dict(event_type_counts),
+                'parser_counts': {key: int(value) for key, value in parser_counts.items()},
+                # E5 ORTHRUS node exports include FileObject/NetFlowObject rows.
+                # Their event Subjects are the process nodes that own the behavior.
+                'gt_object_event_canonical_subjects': gt_object_event_canonical_subjects,
+                'gt_object_event_linkage': {
+                    object_uuid: {
+                        'raw_subject_count': len(gt_object_event_subjects[object_uuid]),
+                        'canonical_subject_count': len({
+                            raw_subject_to_canonical.get(raw_subject, raw_subject)
+                            for raw_subject in gt_object_event_subjects[object_uuid]
+                        }),
+                        'event_count': int(gt_object_event_counts[object_uuid]),
+                        'event_type_counts': {
+                            event_type: int(count)
+                            for event_type, count in gt_object_event_types[object_uuid].items()
+                        },
+                    }
+                    for object_uuid in sorted(gt_object_uuids)
+                },
+            },
+        }, subjhisvec
+    return edge_rows, subjhisvec
+
 def cut_task(
         subject_list,
         return_task_components=False,
         child_threshold=2,
         split_mode="fanout",
         count_segmented_children_upstream=False,
+        use_release_legacy=False,
 ):
+    if use_release_legacy:
+        return _cut_task_release_legacy(subject_list)
     return _cut_task(
         subject_list,
         return_task_components=return_task_components,
@@ -973,6 +1398,53 @@ def cut_task(
         split_mode=split_mode,
         count_segmented_children_upstream=count_segmented_children_upstream,
     )
+
+
+def _cut_task_release_legacy(subject_list):
+    padict = {}
+    chdict = {}
+    for var in subject_list:
+        subj = var[1]
+        pare = var[2]
+        if pare == 'Unknow':
+            continue
+        if subj in chdict:
+            if chdict[subj] == pare:
+                continue
+            nearpare = chdict[subj]
+            if nearpare not in padict:
+                continue
+            if len(padict[nearpare]) == 1:
+                if padict[nearpare][0] == subj:
+                    padict.pop(nearpare)
+                else:
+                    continue
+            else:
+                if subj in padict[nearpare]:
+                    padict[nearpare].remove(subj)
+
+            if pare in padict:
+                padict[pare].append(subj)
+            else:
+                padict[pare] = [subj]
+        else:
+            chdict[subj] = pare
+            if pare in padict:
+                padict[pare].append(subj)
+            else:
+                padict[pare] = [subj]
+
+    for key, value in padict.items():
+        for xvalue in value:
+            if xvalue in padict.keys():
+                padict[key].remove(xvalue)
+
+    chi_pa = []
+    for key, value in padict.items():
+        for var in value:
+            if var != 'Unknow':
+                chi_pa.append([var, key])
+    return chi_pa
 
 
 def _normalize_task_maps(subject_list):
@@ -1319,7 +1791,12 @@ def get_node_vec(subjhistory):
 
 def decompose(edgeList, nodeVec, onedataname, canonical_ground_truth=None):
     if isinstance(edgeList, dict) and 'task_components' in edgeList:
-        return _decompose_task_components(edgeList['task_components'], nodeVec, onedataname)
+        return _decompose_task_components(
+            edgeList['task_components'],
+            nodeVec,
+            onedataname,
+            canonical_ground_truth=canonical_ground_truth,
+        )
     if isinstance(nodeVec, list):
         nodeVec = {
             str(row[0]): [float(x) for x in row[1:]]
@@ -1408,7 +1885,7 @@ def decompose(edgeList, nodeVec, onedataname, canonical_ground_truth=None):
     return data
 
 
-def _decompose_task_components(task_components, nodeVec, onedataname):
+def _decompose_task_components(task_components, nodeVec, onedataname, canonical_ground_truth=None):
     if isinstance(nodeVec, list):
         nodeVec = {
             str(row[0]): [float(x) for x in row[1:]]
@@ -1416,9 +1893,12 @@ def _decompose_task_components(task_components, nodeVec, onedataname):
             if isinstance(row, (list, tuple)) and len(row) >= 43
         }
     attackNode = set()
-    f = open('./groundtruth/{}.txt'.format(onedataname), 'r')
-    for line in f:
-        attackNode.add(line.strip())
+    if canonical_ground_truth is None:
+        f = open('./groundtruth/{}.txt'.format(onedataname), 'r')
+        for line in f:
+            attackNode.add(line.strip())
+    else:
+        attackNode = {str(item).strip() for item in canonical_ground_truth if str(item).strip()}
 
     data = []
     for component in task_components:
@@ -1492,7 +1972,7 @@ class LSTM_GRU_HAT(nn.Module):
         return result
 
 
-def dataenhance(x, addnum, onedataname):
+def dataenhance(x, addnum, onedataname, return_metadata=False):
     LSTMmodel = LSTM_GRU_HAT(6, 256, 6)
     LSTMmodel.load_state_dict(torch.load('./model/stackedlstm_tc.pt'))
     LSTMmodel.to(device)
@@ -1507,7 +1987,10 @@ def dataenhance(x, addnum, onedataname):
                          [9, 1, 3, 5, 0, 0],[6, 1, 3, 5, 1, 0],[5, 1, 2, 36, 0, 0],[10, 1, 2, 36, 0, 0],[6, 1, 3, 5, 0, 0]],
                 'fivedirections':[[5, 1, 2, 90, 3, 0],[6, 1, 3, 4, 1, 2],[5, 1, 2, 90, 26, 0],[6, 1, 3, 4, 1, 1],[5, 1, 2, 12, 25, 0],
                                   [8, 1, 3, 4, 2, 1],[6, 1, 3, 4, 2, 1],[5, 1, 2, 90, 0, 0],[10, 1, 2, 90, 14, 0],[10, 1, 2, 90, 0, 0]]}
-    actlist = benignTop10actdict[onedataname]
+    # E5 uses the same Linux THEIA event encoding and LSTM checkpoint as the
+    # TC3 THEIA corpus, so it intentionally shares that benign template set.
+    template_dataset = 'theia' if onedataname == 'theia_e5' else onedataname
+    actlist = benignTop10actdict[template_dataset]
 
     nodenum = len(x) - 1
     for i in range(addnum):
@@ -1526,7 +2009,16 @@ def dataenhance(x, addnum, onedataname):
         vec = torch.Tensor.tolist(newnodevec)
         newx = copy.deepcopy(x)
         newx[randomnode] = vec
-        addx.append(newx)
+        if return_metadata:
+            addx.append(
+                {
+                    'nodes': newx,
+                    'replaced_index': int(randomnode),
+                    'template_index': int(randomact),
+                }
+            )
+        else:
+            addx.append(newx)
     return addx
 
 

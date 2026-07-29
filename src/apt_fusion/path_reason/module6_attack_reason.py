@@ -169,6 +169,10 @@ def _deterministic_tactic_mapping_enabled(cfg: FusionConfig) -> bool:
     return _tactics_only_enabled(cfg) and _tactic_mapping_mode(cfg) == "deterministic"
 
 
+def _direct_path_mapping_without_claims_enabled(cfg: FusionConfig) -> bool:
+    return bool(getattr(cfg, "path_reason_no_claims_direct_mapping", False))
+
+
 def _clone_attack_candidates(payload: dict[str, Any]) -> dict[str, Any]:
     tactics = [dict(item) for item in payload.get("tactics", []) if isinstance(item, dict)] if isinstance(payload, dict) else []
     techniques = [dict(item) for item in payload.get("techniques", []) if isinstance(item, dict)] if isinstance(payload, dict) else []
@@ -697,14 +701,26 @@ def _user_prompt_map(
 ) -> str:
     attack_mapping_scope = str(context.get("attack_mapping_scope", "full")).strip().lower() or "full"
     tactics_only = attack_mapping_scope == "tactics_only"
-    rules = [
-        "- Use only the provided claims, timeline, and ATT&CK candidates.",
-        "- Treat the claims as pre-matched Holmes-style TTP atoms and preserve their causal ordering.",
-        "- Map each claim independently and do not reuse a technique from one behavior type for an unrelated claim.",
-        "- Choose only from the provided ATT&CK candidate IDs and names.",
-        "- Choose the best-supported tactic first.",
-        "- Prefer ATT&CK IDs from the candidate list when possible.",
-    ]
+    direct_without_claims = bool(context.get("direct_mapping_without_claims", False))
+    if direct_without_claims:
+        rules = [
+            "- Claims are disabled for this ablation: map tactics directly from the provided path dossier, timeline, bridge edges, family tags, and ATT&CK candidates.",
+            "- Do not invent claims or claim IDs.",
+            "- Treat each tactic as requiring concrete dossier evidence, not generic suspicion.",
+            "- Choose only from the provided ATT&CK candidate IDs and names.",
+            "- Choose the best-supported tactic first.",
+            "- Prefer ATT&CK IDs from the candidate list when possible.",
+            "- Leave evidence_claim_ids empty for every mapping.",
+        ]
+    else:
+        rules = [
+            "- Use only the provided claims, timeline, and ATT&CK candidates.",
+            "- Treat the claims as pre-matched Holmes-style TTP atoms and preserve their causal ordering.",
+            "- Map each claim independently and do not reuse a technique from one behavior type for an unrelated claim.",
+            "- Choose only from the provided ATT&CK candidate IDs and names.",
+            "- Choose the best-supported tactic first.",
+            "- Prefer ATT&CK IDs from the candidate list when possible.",
+        ]
     if tactics_only:
         rules.append("- This run is tactic-only: leave technique_id and technique empty for every mapping.")
     else:
@@ -723,7 +739,12 @@ def _user_prompt_map(
         ]
     )
     return (
-        "Map the validated claims below to MITRE ATT&CK and return JSON matching the shape exactly.\n\n"
+        (
+            "Map the candidate chain evidence below to MITRE ATT&CK and return JSON matching the shape exactly.\n\n"
+            if direct_without_claims
+            else "Map the validated claims below to MITRE ATT&CK and return JSON matching the shape exactly.\n\n"
+        )
+        +
         f"JSON shape:\n{_schema_json(_mapping_schema())}\n\n"
         f"Rules:\n{chr(10).join(rules)}\n\n"
         f"Context:\n{_render_compact_mapping_context(context)}"
@@ -1553,6 +1574,110 @@ def _validate_mappings(
     return list(dedup.values()), validation_summary
 
 
+def _validate_mappings_without_claims(
+    cfg: FusionConfig,
+    raw_mappings: list[dict[str, Any]],
+    attack_candidates: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    tactics_only = _tactics_only_enabled(cfg)
+    candidate_tactics = [item for item in attack_candidates.get("tactics", []) or [] if isinstance(item, dict)]
+    candidate_techniques = [item for item in attack_candidates.get("techniques", []) or [] if isinstance(item, dict)]
+    tactic_by_id = {
+        str(item.get("external_id", "")).strip().upper(): item
+        for item in candidate_tactics
+        if str(item.get("external_id", "")).strip()
+    }
+    tactic_by_name = {
+        _normalize_attack_name(str(item.get("name", ""))): item
+        for item in candidate_tactics
+        if str(item.get("name", "")).strip()
+    }
+    technique_by_id = {
+        str(item.get("external_id", "")).strip().upper().replace("/", "."): item
+        for item in candidate_techniques
+        if str(item.get("external_id", "")).strip()
+    }
+    technique_by_name = {
+        _normalize_attack_name(str(item.get("name", ""))): item
+        for item in candidate_techniques
+        if str(item.get("name", "")).strip()
+    }
+    cleaned: list[dict[str, Any]] = []
+    validation_summary = _empty_mapping_validation_summary()
+    for item in raw_mappings:
+        if not isinstance(item, dict):
+            continue
+        validation_summary["raw_mapping_count"] += 1
+        tactic_id = str(item.get("tactic_id", "")).strip().upper()
+        tactic_name = str(item.get("tactic", "")).strip()
+        technique_id = str(item.get("technique_id", "")).strip().upper().replace("/", ".")
+        technique_name = str(item.get("technique", "")).strip()
+        if not tactic_id and not tactic_name and not technique_id and not technique_name:
+            continue
+        if tactic_id and not _TACTIC_ID_PATTERN.match(tactic_id):
+            tactic_id = ""
+        if technique_id and not _TECHNIQUE_ID_PATTERN.match(technique_id):
+            technique_id = ""
+        tactic_choice = tactic_by_id.get(tactic_id) if tactic_id else None
+        if tactic_choice is None and tactic_name:
+            tactic_choice = tactic_by_name.get(_normalize_attack_name(tactic_name))
+        technique_choice = technique_by_id.get(technique_id) if technique_id else None
+        if technique_choice is None and technique_name:
+            technique_choice = technique_by_name.get(_normalize_attack_name(technique_name))
+        if tactic_choice is None and technique_choice is not None:
+            for candidate_tactic_id in technique_choice.get("tactic_ids", []) or []:
+                candidate_tactic = tactic_by_id.get(str(candidate_tactic_id).strip().upper())
+                if candidate_tactic is not None:
+                    tactic_choice = candidate_tactic
+                    break
+            if tactic_choice is None:
+                for tactic_label in technique_choice.get("tactics", []) or []:
+                    tactic_choice = tactic_by_name.get(_normalize_attack_name(str(tactic_label)))
+                    if tactic_choice is not None:
+                        break
+        if tactics_only:
+            technique_choice = None
+            technique_id = ""
+            technique_name = ""
+        if tactic_choice is None and technique_choice is None:
+            continue
+        tactic = None
+        technique = None
+        if tactic_choice is not None and technique_choice is not None:
+            tactic = resolve_tactic_name(cfg, str(tactic_choice.get("name", "")).strip())
+            technique = resolve_technique_name(cfg, str(technique_choice.get("name", "")).strip())
+            technique_tactic_ids = {
+                str(value).strip().upper()
+                for value in technique_choice.get("tactic_ids", []) or []
+                if str(value).strip()
+            }
+            if str(tactic_choice.get("external_id", "")).strip().upper() not in technique_tactic_ids:
+                if tactic is not None and technique is not None and not technique_supports_tactic(technique, tactic):
+                    continue
+        cleaned.append(
+            {
+                "tactic_id": str((tactic_choice or {}).get("external_id", "")).strip().upper(),
+                "tactic": str((tactic_choice or {}).get("name", "")).strip() or (tactic.name if tactic else ""),
+                "technique_id": "" if tactics_only else str((technique_choice or {}).get("external_id", "")).strip().upper(),
+                "technique": "" if tactics_only else (str((technique_choice or {}).get("name", "")).strip() or (technique.name if technique else "")),
+                "evidence_claim_ids": [],
+                "confidence": _clip_confidence(item.get("confidence")),
+                "gaps": [str(value).strip() for value in item.get("gaps", []) if str(value).strip()],
+            }
+        )
+        validation_summary["kept_mapping_count"] += 1
+    dedup: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in cleaned:
+        key = (
+            str(item.get("tactic_id", "")).strip().upper(),
+            str(item.get("technique_id", "")).strip().upper(),
+        )
+        if key not in dedup or float(item["confidence"]) > float(dedup[key]["confidence"]):
+            dedup[key] = item
+    validation_summary["kept_mapping_count"] = len(dedup)
+    return list(dedup.values()), validation_summary
+
+
 def _clip_confidence(value: Any) -> float:
     try:
         return max(0.0, min(1.0, float(value)))
@@ -2127,33 +2252,63 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
             dossier = item.get("dossier", {})
             if not isinstance(dossier, dict):
                 continue
+            direct_without_claims = _direct_path_mapping_without_claims_enabled(cfg)
             task_id = str(dossier.get("task_id", "")).strip()
             path_id = str(dossier.get("path_id", "")).strip()
             if not task_id or not path_id:
                 continue
-            extract_system_prompt = _system_prompt()
-            extract_user_prompt = _user_prompt_extract(dossier, host=cfg.host)
-            raw_extract = _call_ollama_json(cfg, extract_system_prompt, extract_user_prompt)
-            claim_graph = build_holmes_claim_graph(dossier, host=cfg.host)
-            claims = _fallback_claims(dossier, _validate_claims(list(raw_extract.get("claims", [])), dossier), host=cfg.host)
-            claim_graph = {
-                **claim_graph,
-                "claims": claims,
-                "edges": [item for item in claim_graph.get("edges", []) if isinstance(item, dict)],
-            }
-            iocs = _validate_iocs(list(raw_extract.get("iocs", [])))
-            attack_candidates_retrieved = retrieve_attack_candidates(cfg, _synthetic_bundle_for_attack_kb(dossier), claims)
-            attack_candidates_post_priors = _clone_attack_candidates(attack_candidates_retrieved)
-            if _claim_attack_priors_enabled(cfg):
-                attack_candidates_post_priors = _augment_attack_candidates_with_behavior_priors(
+            if direct_without_claims:
+                extract_system_prompt = ""
+                extract_user_prompt = ""
+                raw_extract = {
+                    "summary": str(dossier.get("summary", "")).strip(),
+                    "claims": [],
+                    "iocs": [],
+                    "gaps": ["claims disabled: direct tactic mapping from candidate chain dossier"],
+                }
+                claim_graph = {
+                    "claims": [],
+                    "edges": [],
+                    "diagnostics": {
+                        "matched_atoms": [],
+                        "missing_expected_atoms": [],
+                        "claims_disabled": True,
+                    },
+                    "atom_catalog_version": "claims_disabled_direct_mapping_v1",
+                }
+                claims = []
+                iocs = []
+                attack_candidates_retrieved = retrieve_attack_candidates(
                     cfg,
-                    dossier,
-                    attack_candidates_post_priors,
-                    claims,
+                    _synthetic_bundle_for_attack_kb(dossier),
+                    None,
                 )
-                claim_attack_hints = _behavior_prior_hints_for_claims(cfg, dossier, claims)
-            else:
+                attack_candidates_post_priors = _clone_attack_candidates(attack_candidates_retrieved)
                 claim_attack_hints = []
+            else:
+                extract_system_prompt = _system_prompt()
+                extract_user_prompt = _user_prompt_extract(dossier, host=cfg.host)
+                raw_extract = _call_ollama_json(cfg, extract_system_prompt, extract_user_prompt)
+                claim_graph = build_holmes_claim_graph(dossier, host=cfg.host)
+                claims = _fallback_claims(dossier, _validate_claims(list(raw_extract.get("claims", [])), dossier), host=cfg.host)
+                claim_graph = {
+                    **claim_graph,
+                    "claims": claims,
+                    "edges": [item for item in claim_graph.get("edges", []) if isinstance(item, dict)],
+                }
+                iocs = _validate_iocs(list(raw_extract.get("iocs", [])))
+                attack_candidates_retrieved = retrieve_attack_candidates(cfg, _synthetic_bundle_for_attack_kb(dossier), claims)
+                attack_candidates_post_priors = _clone_attack_candidates(attack_candidates_retrieved)
+                if _claim_attack_priors_enabled(cfg):
+                    attack_candidates_post_priors = _augment_attack_candidates_with_behavior_priors(
+                        cfg,
+                        dossier,
+                        attack_candidates_post_priors,
+                        claims,
+                    )
+                    claim_attack_hints = _behavior_prior_hints_for_claims(cfg, dossier, claims)
+                else:
+                    claim_attack_hints = []
             attack_candidates = _filter_attack_candidates_for_scope(cfg, attack_candidates_post_priors)
             attack_candidates, attack_candidate_context_prune_reason = _prune_attack_candidates_for_claim_context(
                 cfg,
@@ -2168,6 +2323,7 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
                 "claim_attack_hints": claim_attack_hints,
                 "attack_candidates": attack_candidates,
                 "attack_mapping_scope": _attack_mapping_scope(cfg),
+                "direct_mapping_without_claims": direct_without_claims,
             }
             mapping_system_prompt = _system_prompt()
             mapping_user_prompt = ""
@@ -2181,20 +2337,27 @@ def run_module6_reason(cfg: FusionConfig) -> Dict[str, str]:
             else:
                 mapping_user_prompt = _user_prompt_map(
                     mapping_context,
-                    include_claim_attack_hints=_claim_attack_priors_enabled(cfg),
+                    include_claim_attack_hints=_claim_attack_priors_enabled(cfg) and not direct_without_claims,
                 )
                 raw_mapping = _call_ollama_json(cfg, mapping_system_prompt, mapping_user_prompt)
-                mappings, mapping_validation_summary = _validate_mappings(
-                    cfg,
-                    dossier,
-                    list(raw_mapping.get("attack_mappings", [])),
-                    attack_candidates,
-                    claims,
-                )
-                mappings = _apply_behavior_prior_mappings(cfg, dossier, claims, attack_candidates, mappings)
-                mappings = _generic_claim_backed_tactic_backfill(cfg, dossier, claims, attack_candidates, mappings)
-                mappings = _cadets_claim_backed_tactic_backfill(cfg, dossier, claims, attack_candidates, mappings)
-                mappings = _generic_claim_context_mapping_guard(cfg, dossier, claims, mappings)
+                if direct_without_claims:
+                    mappings, mapping_validation_summary = _validate_mappings_without_claims(
+                        cfg,
+                        list(raw_mapping.get("attack_mappings", [])),
+                        attack_candidates,
+                    )
+                else:
+                    mappings, mapping_validation_summary = _validate_mappings(
+                        cfg,
+                        dossier,
+                        list(raw_mapping.get("attack_mappings", [])),
+                        attack_candidates,
+                        claims,
+                    )
+                    mappings = _apply_behavior_prior_mappings(cfg, dossier, claims, attack_candidates, mappings)
+                    mappings = _generic_claim_backed_tactic_backfill(cfg, dossier, claims, attack_candidates, mappings)
+                    mappings = _cadets_claim_backed_tactic_backfill(cfg, dossier, claims, attack_candidates, mappings)
+                    mappings = _generic_claim_context_mapping_guard(cfg, dossier, claims, mappings)
             report = {
                 "task_id": task_id,
                 "path_id": path_id,
