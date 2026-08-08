@@ -30,6 +30,7 @@ class FusionConfig:
     use_sequence_embeddings: bool = True
     use_ocr_stat_features: bool = True
     graphsage_append_ocr_stat_features: bool = False
+    task_tc3_event_stats_mode: str = "legacy_aggregate"
     ocr_stat_active_threshold_sec: float = 1.0
     task_graph_stat_late_fusion_enabled: bool = False
     task_graph_stat_fusion_weight: float = 0.25
@@ -39,14 +40,33 @@ class FusionConfig:
     task_detector_model_output: Path | None = None
     task_ground_truth_path: Path | None = None
     task_sequence_model_path: Path | None = None
+    task_sequence_encoder_mode: str = "legacy"
+    task_semantic_sequence_pretrained_path: Path | None = None
+    task_semantic_sequence_epochs: int = 5
+    task_semantic_sequence_batch_size: int = 512
+    task_semantic_sequence_learning_rate: float = 0.001
     task_normal_only_train_fraction: float = 0.70
     task_normal_only_validation_fraction: float = 0.15
     task_normal_only_task_prototypes: int = 8
     task_normal_only_node_prototypes: int = 32
     task_normal_only_node_sample_limit: int = 100000
     task_normal_only_local_top_k: int = 3
+    task_normal_only_local_top_k_mode: str = "fixed"
+    task_normal_only_local_top_k_max: int = 16
+    task_normal_only_global_model: str = "kmeans"
+    task_normal_only_global_knn_neighbors: int = 5
     task_normal_only_global_weight: float = 0.40
-    task_normal_only_validation_fpr: float = 0.01
+    task_normal_only_detector: str = "prototype"
+    task_normal_only_gnn_direction_mode: str = "undirected"
+    task_normal_only_gnn_hidden_dim: int = 64
+    task_normal_only_gnn_num_layers: int = 2
+    task_normal_only_gnn_dropout: float = 0.10
+    task_normal_only_gnn_epochs: int = 20
+    task_normal_only_gnn_batch_size: int = 4
+    task_normal_only_gnn_learning_rate: float = 0.001
+    task_normal_only_gnn_weight_decay: float = 0.0001
+    # A 2% benign calibration target avoided the overly conservative 1% operating point on TC3.
+    task_normal_only_validation_fpr: float = 0.02
     random_seed: int = 42
     task_classifier_hidden_dim: int = 64
     task_classifier_num_layers: int = 2
@@ -83,18 +103,46 @@ class FusionConfig:
     llm_deepseek_api_key: str = ""
     llm_ollama_base_url: str = ""
     llm_request_timeout_sec: int = 600
-    graphdb_repository_url: str = ""
-    graphdb_username: str = ""
-    graphdb_password: str = ""
     local_context_hops: int = 1
     module3_task_selection_mode: str = "predicted_positive"
     task_component_split_mode: str = "fanout"
     task_component_child_threshold: int = 2
     task_component_count_segmented_children_upstream: bool = False
     task_tapas_release_legacy_cut_logic: bool = False
+    task_component_provgrp_behavior_partition_enabled: bool = False
+    task_component_provgrp_min_direct_children: int = 10
+    task_component_provgrp_min_cluster_size: int = 5
+    task_component_provgrp_min_samples: int = 2
+    task_component_provgrp_max_events_per_matrix: int = 512
+    task_component_provgrp_batch_overlap_events: int = 64
     task_component_theia_temporal_split_enabled: bool = False
     task_component_theia_max_span_minutes: int = 45
     task_component_theia_branch_gap_minutes: int = 10
+    task_component_root_temporal_split_enabled: bool = False
+    task_component_root_temporal_min_task_nodes: int = 500
+    task_component_root_temporal_min_direct_children: int = 64
+    task_component_root_temporal_max_span_minutes: int = 45
+    task_component_root_temporal_branch_gap_minutes: int = 10
+    task_component_root_temporal_session_max_minutes: int = 60
+    task_component_root_temporal_max_sessions: int = 0
+    task_component_temporal_episode_split_enabled: bool = False
+    task_component_temporal_episode_parent_missing_only: bool = False
+    task_component_temporal_episode_min_task_nodes: int = 500
+    task_component_temporal_episode_min_direct_children: int = 32
+    task_component_temporal_episode_min_span_minutes: int = 60
+    task_component_temporal_episode_gap_mode: str = "median_mad"
+    task_component_temporal_episode_fixed_gap_minutes: int = 30
+    task_component_temporal_episode_gap_quantile: float = 0.90
+    task_component_temporal_episode_mad_multiplier: float = 3.0
+    task_component_temporal_episode_min_children_per_episode: int = 8
+    task_component_temporal_episode_max_episodes: int = 8
+    task_component_temporal_episode_budget_strategy: str = "adjacent_greedy"
+    task_component_synthetic_root_isolation_enabled: bool = False
+    task_component_synthetic_root_isolation_min_task_nodes: int = 500
+    task_component_synthetic_root_isolation_min_direct_children: int = 64
+    task_component_synthetic_root_selective_isolation_enabled: bool = False
+    task_component_synthetic_root_selective_max_exec_target_frequency: int = 3
+    task_component_branch_object_overlap_split_enabled: bool = False
     attack_eval_gt_json_path: Path | None = None
     path_reason_gt_window_filter_mode: str = "none"
     path_reason_gt_window_filter_pad_minutes: int = 0
@@ -136,10 +184,6 @@ class FusionConfig:
     attack_mapping_scope: str = "full"
     tactic_mapping_mode: str = "llm"
     path_reason_rules_path: Path | None = None
-
-    @property
-    def module0_dir(self) -> Path:
-        return self.artifacts_dir / "module0"
 
     @property
     def module1_dir(self) -> Path:
@@ -192,6 +236,7 @@ def load_config(path: str | Path) -> FusionConfig:
         use_sequence_embeddings=bool(_get(data, "use_sequence_embeddings", True)),
         use_ocr_stat_features=bool(_get(data, "use_ocr_stat_features", True)),
         graphsage_append_ocr_stat_features=bool(_get(data, "graphsage_append_ocr_stat_features", False)),
+        task_tc3_event_stats_mode=str(_get(data, "task_tc3_event_stats_mode", "legacy_aggregate")),
         ocr_stat_active_threshold_sec=float(_get(data, "ocr_stat_active_threshold_sec", 1.0)),
         task_graph_stat_late_fusion_enabled=bool(_get(data, "task_graph_stat_late_fusion_enabled", False)),
         task_graph_stat_fusion_weight=float(_get(data, "task_graph_stat_fusion_weight", 0.25)),
@@ -203,14 +248,34 @@ def load_config(path: str | Path) -> FusionConfig:
         task_detector_model_output=_optional_path(_get(data, "task_detector_model_output", "")),
         task_ground_truth_path=_optional_path(_get(data, "task_ground_truth_path", "")),
         task_sequence_model_path=_optional_path(_get(data, "task_sequence_model_path", "")),
+        task_sequence_encoder_mode=str(_get(data, "task_sequence_encoder_mode", "legacy")),
+        task_semantic_sequence_pretrained_path=_optional_path(
+            _get(data, "task_semantic_sequence_pretrained_path", "")
+        ),
+        task_semantic_sequence_epochs=int(_get(data, "task_semantic_sequence_epochs", 5)),
+        task_semantic_sequence_batch_size=int(_get(data, "task_semantic_sequence_batch_size", 512)),
+        task_semantic_sequence_learning_rate=float(_get(data, "task_semantic_sequence_learning_rate", 0.001)),
         task_normal_only_train_fraction=float(_get(data, "task_normal_only_train_fraction", 0.70)),
         task_normal_only_validation_fraction=float(_get(data, "task_normal_only_validation_fraction", 0.15)),
         task_normal_only_task_prototypes=int(_get(data, "task_normal_only_task_prototypes", 8)),
         task_normal_only_node_prototypes=int(_get(data, "task_normal_only_node_prototypes", 32)),
         task_normal_only_node_sample_limit=int(_get(data, "task_normal_only_node_sample_limit", 100000)),
         task_normal_only_local_top_k=int(_get(data, "task_normal_only_local_top_k", 3)),
+        task_normal_only_local_top_k_mode=str(_get(data, "task_normal_only_local_top_k_mode", "fixed")),
+        task_normal_only_local_top_k_max=int(_get(data, "task_normal_only_local_top_k_max", 16)),
+        task_normal_only_global_model=str(_get(data, "task_normal_only_global_model", "kmeans")),
+        task_normal_only_global_knn_neighbors=int(_get(data, "task_normal_only_global_knn_neighbors", 5)),
         task_normal_only_global_weight=float(_get(data, "task_normal_only_global_weight", 0.40)),
-        task_normal_only_validation_fpr=float(_get(data, "task_normal_only_validation_fpr", 0.01)),
+        task_normal_only_detector=str(_get(data, "task_normal_only_detector", "prototype")),
+        task_normal_only_gnn_direction_mode=str(_get(data, "task_normal_only_gnn_direction_mode", "undirected")),
+        task_normal_only_gnn_hidden_dim=int(_get(data, "task_normal_only_gnn_hidden_dim", 64)),
+        task_normal_only_gnn_num_layers=int(_get(data, "task_normal_only_gnn_num_layers", 2)),
+        task_normal_only_gnn_dropout=float(_get(data, "task_normal_only_gnn_dropout", 0.10)),
+        task_normal_only_gnn_epochs=int(_get(data, "task_normal_only_gnn_epochs", 20)),
+        task_normal_only_gnn_batch_size=int(_get(data, "task_normal_only_gnn_batch_size", 4)),
+        task_normal_only_gnn_learning_rate=float(_get(data, "task_normal_only_gnn_learning_rate", 0.001)),
+        task_normal_only_gnn_weight_decay=float(_get(data, "task_normal_only_gnn_weight_decay", 0.0001)),
+        task_normal_only_validation_fpr=float(_get(data, "task_normal_only_validation_fpr", 0.02)),
         random_seed=int(_get(data, "random_seed", 42)),
         task_classifier_hidden_dim=int(_get(data, "task_classifier_hidden_dim", 64)),
         task_classifier_num_layers=int(_get(data, "task_classifier_num_layers", 2)),
@@ -247,9 +312,6 @@ def load_config(path: str | Path) -> FusionConfig:
         llm_deepseek_api_key=str(_get(data, "llm_deepseek_api_key", "")),
         llm_ollama_base_url=str(_get(data, "llm_ollama_base_url", "")),
         llm_request_timeout_sec=int(_get(data, "llm_request_timeout_sec", 600)),
-        graphdb_repository_url=str(_get(data, "graphdb_repository_url", "")),
-        graphdb_username=str(_get(data, "graphdb_username", "")),
-        graphdb_password=str(_get(data, "graphdb_password", "")),
         local_context_hops=int(_get(data, "local_context_hops", 1)),
         module3_task_selection_mode=str(_get(data, "module3_task_selection_mode", "predicted_positive")),
         task_component_split_mode=str(_get(data, "task_component_split_mode", "fanout")),
@@ -260,11 +322,104 @@ def load_config(path: str | Path) -> FusionConfig:
         task_tapas_release_legacy_cut_logic=bool(
             _get(data, "task_tapas_release_legacy_cut_logic", False)
         ),
+        task_component_provgrp_behavior_partition_enabled=bool(
+            _get(data, "task_component_provgrp_behavior_partition_enabled", False)
+        ),
+        task_component_provgrp_min_direct_children=int(
+            _get(data, "task_component_provgrp_min_direct_children", 10)
+        ),
+        task_component_provgrp_min_cluster_size=int(
+            _get(data, "task_component_provgrp_min_cluster_size", 5)
+        ),
+        task_component_provgrp_min_samples=int(
+            _get(data, "task_component_provgrp_min_samples", 2)
+        ),
+        task_component_provgrp_max_events_per_matrix=int(
+            _get(data, "task_component_provgrp_max_events_per_matrix", 512)
+        ),
+        task_component_provgrp_batch_overlap_events=int(
+            _get(data, "task_component_provgrp_batch_overlap_events", 64)
+        ),
         task_component_theia_temporal_split_enabled=bool(
             _get(data, "task_component_theia_temporal_split_enabled", False)
         ),
         task_component_theia_max_span_minutes=int(_get(data, "task_component_theia_max_span_minutes", 45)),
         task_component_theia_branch_gap_minutes=int(_get(data, "task_component_theia_branch_gap_minutes", 10)),
+        task_component_root_temporal_split_enabled=bool(
+            _get(data, "task_component_root_temporal_split_enabled", False)
+        ),
+        task_component_root_temporal_min_task_nodes=int(
+            _get(data, "task_component_root_temporal_min_task_nodes", 500)
+        ),
+        task_component_root_temporal_min_direct_children=int(
+            _get(data, "task_component_root_temporal_min_direct_children", 64)
+        ),
+        task_component_root_temporal_max_span_minutes=int(
+            _get(data, "task_component_root_temporal_max_span_minutes", 45)
+        ),
+        task_component_root_temporal_branch_gap_minutes=int(
+            _get(data, "task_component_root_temporal_branch_gap_minutes", 10)
+        ),
+        task_component_root_temporal_session_max_minutes=int(
+            _get(data, "task_component_root_temporal_session_max_minutes", 60)
+        ),
+        task_component_root_temporal_max_sessions=int(
+            _get(data, "task_component_root_temporal_max_sessions", 0)
+        ),
+        task_component_temporal_episode_split_enabled=bool(
+            _get(data, "task_component_temporal_episode_split_enabled", False)
+        ),
+        task_component_temporal_episode_parent_missing_only=bool(
+            _get(data, "task_component_temporal_episode_parent_missing_only", False)
+        ),
+        task_component_temporal_episode_min_task_nodes=int(
+            _get(data, "task_component_temporal_episode_min_task_nodes", 500)
+        ),
+        task_component_temporal_episode_min_direct_children=int(
+            _get(data, "task_component_temporal_episode_min_direct_children", 32)
+        ),
+        task_component_temporal_episode_min_span_minutes=int(
+            _get(data, "task_component_temporal_episode_min_span_minutes", 60)
+        ),
+        task_component_temporal_episode_gap_mode=str(
+            _get(data, "task_component_temporal_episode_gap_mode", "median_mad")
+        ),
+        task_component_temporal_episode_fixed_gap_minutes=int(
+            _get(data, "task_component_temporal_episode_fixed_gap_minutes", 30)
+        ),
+        task_component_temporal_episode_gap_quantile=float(
+            _get(data, "task_component_temporal_episode_gap_quantile", 0.90)
+        ),
+        task_component_temporal_episode_mad_multiplier=float(
+            _get(data, "task_component_temporal_episode_mad_multiplier", 3.0)
+        ),
+        task_component_temporal_episode_min_children_per_episode=int(
+            _get(data, "task_component_temporal_episode_min_children_per_episode", 8)
+        ),
+        task_component_temporal_episode_max_episodes=int(
+            _get(data, "task_component_temporal_episode_max_episodes", 8)
+        ),
+        task_component_temporal_episode_budget_strategy=str(
+            _get(data, "task_component_temporal_episode_budget_strategy", "adjacent_greedy")
+        ),
+        task_component_synthetic_root_isolation_enabled=bool(
+            _get(data, "task_component_synthetic_root_isolation_enabled", False)
+        ),
+        task_component_synthetic_root_isolation_min_task_nodes=int(
+            _get(data, "task_component_synthetic_root_isolation_min_task_nodes", 500)
+        ),
+        task_component_synthetic_root_isolation_min_direct_children=int(
+            _get(data, "task_component_synthetic_root_isolation_min_direct_children", 64)
+        ),
+        task_component_synthetic_root_selective_isolation_enabled=bool(
+            _get(data, "task_component_synthetic_root_selective_isolation_enabled", False)
+        ),
+        task_component_synthetic_root_selective_max_exec_target_frequency=int(
+            _get(data, "task_component_synthetic_root_selective_max_exec_target_frequency", 3)
+        ),
+        task_component_branch_object_overlap_split_enabled=bool(
+            _get(data, "task_component_branch_object_overlap_split_enabled", False)
+        ),
         attack_eval_gt_json_path=_optional_path(_get(data, "attack_eval_gt_json_path", "")),
         path_reason_gt_window_filter_mode=str(_get(data, "path_reason_gt_window_filter_mode", "none")),
         path_reason_gt_window_filter_pad_minutes=int(_get(data, "path_reason_gt_window_filter_pad_minutes", 0)),
@@ -348,6 +503,18 @@ def _validate(cfg: FusionConfig) -> None:
     if cfg.task_classifier_hidden_dim <= 0:
         raise ValueError("task_classifier_hidden_dim must be > 0")
 
+    if cfg.task_sequence_encoder_mode not in {"legacy", "semantic_v1"}:
+        raise ValueError("task_sequence_encoder_mode must be 'legacy' or 'semantic_v1'")
+
+    if cfg.task_semantic_sequence_epochs <= 0:
+        raise ValueError("task_semantic_sequence_epochs must be > 0")
+
+    if cfg.task_semantic_sequence_batch_size <= 0:
+        raise ValueError("task_semantic_sequence_batch_size must be > 0")
+
+    if cfg.task_semantic_sequence_learning_rate <= 0:
+        raise ValueError("task_semantic_sequence_learning_rate must be > 0")
+
     if not (0.0 < cfg.task_normal_only_train_fraction < 1.0):
         raise ValueError("task_normal_only_train_fraction must be in (0, 1)")
 
@@ -368,6 +535,45 @@ def _validate(cfg: FusionConfig) -> None:
 
     if cfg.task_normal_only_local_top_k <= 0:
         raise ValueError("task_normal_only_local_top_k must be > 0")
+
+    if cfg.task_normal_only_local_top_k_mode not in {"fixed", "sqrt"}:
+        raise ValueError("task_normal_only_local_top_k_mode must be 'fixed' or 'sqrt'")
+
+    if cfg.task_normal_only_local_top_k_max <= 0:
+        raise ValueError("task_normal_only_local_top_k_max must be > 0")
+
+    if cfg.task_normal_only_global_model not in {"kmeans", "knn"}:
+        raise ValueError("task_normal_only_global_model must be 'kmeans' or 'knn'")
+
+    if cfg.task_normal_only_detector not in {"prototype", "gin_autoencoder"}:
+        raise ValueError("task_normal_only_detector must be 'prototype' or 'gin_autoencoder'")
+
+    if cfg.task_normal_only_gnn_direction_mode not in {"undirected", "directed"}:
+        raise ValueError("task_normal_only_gnn_direction_mode must be 'undirected' or 'directed'")
+
+    if cfg.task_normal_only_gnn_hidden_dim <= 0:
+        raise ValueError("task_normal_only_gnn_hidden_dim must be > 0")
+
+    if cfg.task_normal_only_gnn_num_layers <= 0:
+        raise ValueError("task_normal_only_gnn_num_layers must be > 0")
+
+    if not (0.0 <= cfg.task_normal_only_gnn_dropout < 1.0):
+        raise ValueError("task_normal_only_gnn_dropout must be in [0, 1)")
+
+    if cfg.task_normal_only_gnn_epochs <= 0:
+        raise ValueError("task_normal_only_gnn_epochs must be > 0")
+
+    if cfg.task_normal_only_gnn_batch_size <= 0:
+        raise ValueError("task_normal_only_gnn_batch_size must be > 0")
+
+    if cfg.task_normal_only_gnn_learning_rate <= 0:
+        raise ValueError("task_normal_only_gnn_learning_rate must be > 0")
+
+    if cfg.task_normal_only_gnn_weight_decay < 0:
+        raise ValueError("task_normal_only_gnn_weight_decay must be >= 0")
+
+    if cfg.task_normal_only_global_knn_neighbors <= 0:
+        raise ValueError("task_normal_only_global_knn_neighbors must be > 0")
 
     if not (0.0 <= cfg.task_normal_only_global_weight <= 1.0):
         raise ValueError("task_normal_only_global_weight must be in [0, 1]")
@@ -540,6 +746,26 @@ def _validate(cfg: FusionConfig) -> None:
     if cfg.task_component_child_threshold < 0:
         raise ValueError("task_component_child_threshold must be >= 0")
 
+    if cfg.task_component_provgrp_min_direct_children < 1:
+        raise ValueError("task_component_provgrp_min_direct_children must be >= 1")
+
+    if cfg.task_component_provgrp_min_cluster_size < 2:
+        raise ValueError("task_component_provgrp_min_cluster_size must be >= 2")
+
+    if cfg.task_component_provgrp_min_samples < 1:
+        raise ValueError("task_component_provgrp_min_samples must be >= 1")
+
+    if cfg.task_component_provgrp_max_events_per_matrix < 2:
+        raise ValueError("task_component_provgrp_max_events_per_matrix must be >= 2")
+    if (
+        cfg.task_component_provgrp_batch_overlap_events < 0
+        or cfg.task_component_provgrp_batch_overlap_events >= cfg.task_component_provgrp_max_events_per_matrix
+    ):
+        raise ValueError(
+            "task_component_provgrp_batch_overlap_events must be >= 0 and smaller than "
+            "task_component_provgrp_max_events_per_matrix"
+        )
+
     if cfg.task_component_theia_max_span_minutes <= 0:
         raise ValueError("task_component_theia_max_span_minutes must be > 0")
 
@@ -561,6 +787,13 @@ def _validate(cfg: FusionConfig) -> None:
 
     if cfg.graphsage_append_ocr_stat_features and not cfg.use_ocr_stat_features:
         raise ValueError("graphsage_append_ocr_stat_features requires use_ocr_stat_features=true")
+
+    allowed_tc3_event_stats_modes = {"legacy_aggregate", "core", "extended", "security_semantic"}
+    if cfg.task_tc3_event_stats_mode not in allowed_tc3_event_stats_modes:
+        raise ValueError(
+            "task_tc3_event_stats_mode must be one of "
+            f"{sorted(allowed_tc3_event_stats_modes)}"
+        )
 
     if cfg.dataset_family in {"tc3", "optc"} and not cfg.use_sequence_embeddings and not cfg.use_ocr_stat_features:
         raise ValueError(

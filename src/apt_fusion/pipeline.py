@@ -8,7 +8,6 @@ from .path_reason.module3_evidence_recover import run_module3_evidence
 from .path_reason.module4_semantic_compact import run_module4_compact
 from .path_reason.module5_path_finder import run_module5_paths
 from .path_reason.module6_attack_reason import run_module6_reason
-from .task_detection.module0_preprocess import run_module0
 from .task_detection.module1_online_graph import run_module1
 from .task_detection.module2_online_detection import run_module2
 
@@ -37,7 +36,6 @@ def _default_module2_paths(cfg: FusionConfig) -> Dict[str, Path]:
 def run_pipeline(cfg: FusionConfig, stage: str) -> Dict[str, str]:
     stage = stage.lower()
     allowed = {
-        "module0",
         "module1",
         "module2",
         "module3_evidence",
@@ -56,10 +54,6 @@ def run_pipeline(cfg: FusionConfig, stage: str) -> Dict[str, str]:
 
     if stage == "full_path_reason":
         print(PATH_REASON_PIPELINE_MESSAGE)
-
-    if stage in {"module0", "module1", "module2", "full_path_reason"}:
-        out = run_module0(cfg)
-        outputs.update({f"module0.{k}": str(v) for k, v in out.items()})
 
     if stage in {"module1", "module2", "full_path_reason"}:
         module1_outputs = run_module1(cfg)

@@ -713,6 +713,7 @@ def _build_process_alias_state(cfg: FusionConfig) -> _ProcessAliasState:
         )
 
     theia_tgid_map: Dict[str, str] = {}
+    trace_subject_rows: Dict[str, Dict[str, str]] = {}
     for log_file in _iter_log_files(cfg.source_logs, cfg.host):
         for line in _iter_lines(log_file):
             if DATUM_KEY not in line:
@@ -735,26 +736,20 @@ def _build_process_alias_state(cfg: FusionConfig) -> _ProcessAliasState:
                 cid = _first_non_empty([subject.get("cid")])
                 if not cid:
                     continue
-                raw_to_canonical.setdefault(subject_uuid, cid)
-                raw_to_canonical.setdefault(cid, cid)
-                subject_attr = _extract_subject_node_attr(subject)
-                if subject_attr:
-                    canonical_attr.setdefault(cid, subject_attr)
+                parent_uuid = (
+                    _unwrap_scalar(subject["parentSubject"].get(UUID_KEY))
+                    if isinstance(subject.get("parentSubject"), dict)
+                    else ""
+                )
                 properties = subject.get("properties")
                 prop_map = properties.get("map", {}) if isinstance(properties, dict) else {}
-                if isinstance(prop_map, dict):
-                    ppid = _first_non_empty([prop_map.get("ppid")])
-                    if ppid and ppid != "0":
-                        canonical_parent.setdefault(cid, ppid)
-                if cid not in canonical_parent:
-                    parent_uuid = (
-                        _unwrap_scalar(subject["parentSubject"].get(UUID_KEY))
-                        if isinstance(subject.get("parentSubject"), dict)
-                        else ""
-                    )
-                    parent_canonical = raw_to_canonical.get(parent_uuid, parent_uuid)
-                    if parent_canonical:
-                        canonical_parent.setdefault(cid, parent_canonical)
+                trace_subject_rows[subject_uuid] = {
+                    "cid": cid,
+                    "parent_uuid": parent_uuid,
+                    "ppid": _first_non_empty([prop_map.get("ppid")]) if isinstance(prop_map, dict) else "",
+                    "subject_type": str(subject.get("type", "")).strip().upper(),
+                    "node_attr": _extract_subject_node_attr(subject),
+                }
                 continue
 
             if cfg.host == "theia":
@@ -782,6 +777,57 @@ def _build_process_alias_state(cfg: FusionConfig) -> _ProcessAliasState:
             subject_attr = _extract_subject_node_attr(subject)
             if subject_attr:
                 canonical_attr.setdefault(subject_uuid, subject_attr)
+
+    if cfg.host == "trace":
+        trace_owner_cache: Dict[str, str] = {}
+
+        def resolve_trace_owner(subject_uuid: str, trail: set[str] | None = None) -> str:
+            subject_uuid = str(subject_uuid)
+            if subject_uuid in trace_owner_cache:
+                return trace_owner_cache[subject_uuid]
+            row = trace_subject_rows.get(subject_uuid)
+            if row is None:
+                return subject_uuid
+            if trail is None:
+                trail = set()
+            if subject_uuid in trail:
+                return str(row.get("cid") or subject_uuid)
+            trail.add(subject_uuid)
+            if row.get("subject_type") == "SUBJECT_UNIT" and row.get("parent_uuid"):
+                owner = resolve_trace_owner(str(row["parent_uuid"]), trail)
+            else:
+                owner = str(row.get("cid") or subject_uuid)
+            trail.remove(subject_uuid)
+            trace_owner_cache[subject_uuid] = owner
+            return owner
+
+        for subject_uuid in trace_subject_rows:
+            canonical = resolve_trace_owner(subject_uuid)
+            raw_to_canonical[subject_uuid] = canonical
+            raw_to_canonical.setdefault(canonical, canonical)
+
+        # Prefer the actual process metadata over a nested execution unit.
+        for subject_uuid, row in sorted(
+            trace_subject_rows.items(),
+            key=lambda item: item[1].get("subject_type") == "SUBJECT_UNIT",
+        ):
+            node_attr = row.get("node_attr", "")
+            if node_attr:
+                canonical_attr.setdefault(resolve_trace_owner(subject_uuid), node_attr)
+
+        for subject_uuid, row in trace_subject_rows.items():
+            if row.get("subject_type") == "SUBJECT_UNIT":
+                continue
+            canonical = resolve_trace_owner(subject_uuid)
+            ppid = row.get("ppid", "")
+            if ppid and ppid != "0":
+                canonical_parent.setdefault(canonical, ppid)
+                continue
+            parent_uuid = row.get("parent_uuid", "")
+            if parent_uuid:
+                parent_canonical = resolve_trace_owner(parent_uuid)
+                if parent_canonical != canonical:
+                    canonical_parent.setdefault(canonical, parent_canonical)
 
     return _ProcessAliasState(
         raw_to_canonical=raw_to_canonical,

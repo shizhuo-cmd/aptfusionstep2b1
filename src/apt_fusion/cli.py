@@ -7,7 +7,6 @@ from .config import load_config
 from .pipeline import run_pipeline
 
 _ACTIVE_STAGES = [
-    "module0",
     "module1",
     "module2",
     "module3_evidence",

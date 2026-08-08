@@ -119,7 +119,10 @@ def _resolve_thread_subject_owners(subject_rows):
         subject_tgid = str(row.get("tgid", "")).strip()
         if parent_uuid in subject_info:
             parent_tgid = str(subject_info[parent_uuid].get("tgid", "")).strip()
-            if subject_type == "SUBJECT_THREAD":
+            # TRACE emits many SUBJECT_UNIT records for execution units within
+            # an existing process.  They inherit the parent process identity;
+            # treating their cid as a standalone process creates spurious nodes.
+            if subject_type in {"SUBJECT_THREAD", "SUBJECT_UNIT"}:
                 owner = resolve_owner(parent_uuid, trail)
             elif subject_tgid and parent_tgid and subject_tgid == parent_tgid:
                 owner = resolve_owner(parent_uuid, trail)
@@ -167,13 +170,127 @@ def _remap_event_subjects(event_count, raw_to_canonical):
             remapped[remapped_key] = count
     return remapped
 
-def parser_cadets(data_path):
+
+# Stable, dataset-independent labels for the semantic sequence encoder.  These
+# labels are intentionally categorical; they are embedded by the new encoder
+# rather than treated as continuous legacy TAPAS event IDs.
+_SEMANTIC_EVENT_IDS = {
+    "PROCESS_CREATE": 1,
+    "EXECUTE": 2,
+    "PROCESS_EXIT": 3,
+    "FILE_OPEN": 4,
+    "FILE_READ": 5,
+    "FILE_WRITE": 6,
+    "FILE_REMOVE_OR_RENAME": 7,
+    "FILE_METADATA": 8,
+    "NETWORK_CONNECT_OR_ACCEPT": 9,
+    "NETWORK_RECEIVE": 10,
+    "NETWORK_SEND": 11,
+    "PRIVILEGE_CHANGE": 12,
+    "MEMORY_CONTROL": 13,
+    "IPC_OR_SIGNAL": 14,
+    "OTHER": 15,
+}
+
+
+def _semantic_event_id(event_type):
+    value = str(event_type or "").upper()
+    if value in {"EVENT_FORK", "EVENT_CLONE", "EVENT_VFORK", "EVENT_CREATE_PROCESS"}:
+        return _SEMANTIC_EVENT_IDS["PROCESS_CREATE"]
+    if value in {"EVENT_EXECUTE", "EVENT_EXECUTE2"}:
+        return _SEMANTIC_EVENT_IDS["EXECUTE"]
+    if value in {"EVENT_EXIT", "EVENT_EXIT_GROUP"}:
+        return _SEMANTIC_EVENT_IDS["PROCESS_EXIT"]
+    if value in {"EVENT_OPEN", "EVENT_OPENAT", "EVENT_CLOSE"}:
+        return _SEMANTIC_EVENT_IDS["FILE_OPEN"]
+    if value in {"EVENT_READ", "EVENT_READV", "EVENT_PREAD", "EVENT_PREAD64"}:
+        return _SEMANTIC_EVENT_IDS["FILE_READ"]
+    if value in {"EVENT_WRITE", "EVENT_WRITEV", "EVENT_PWRITE", "EVENT_PWRITE64", "EVENT_CREATE_OBJECT"}:
+        return _SEMANTIC_EVENT_IDS["FILE_WRITE"]
+    if value in {"EVENT_UNLINK", "EVENT_UNLINKAT", "EVENT_RENAME", "EVENT_RENAMEAT"}:
+        return _SEMANTIC_EVENT_IDS["FILE_REMOVE_OR_RENAME"]
+    if value in {"EVENT_MODIFY_FILE_ATTRIBUTES", "EVENT_CHMOD", "EVENT_CHOWN", "EVENT_TRUNCATE"}:
+        return _SEMANTIC_EVENT_IDS["FILE_METADATA"]
+    if value in {"EVENT_CONNECT", "EVENT_ACCEPT"}:
+        return _SEMANTIC_EVENT_IDS["NETWORK_CONNECT_OR_ACCEPT"]
+    if value in {"EVENT_RECVFROM", "EVENT_RECVMSG", "EVENT_RECEIVE"}:
+        return _SEMANTIC_EVENT_IDS["NETWORK_RECEIVE"]
+    if value in {"EVENT_SENDTO", "EVENT_SENDMSG", "EVENT_SEND"}:
+        return _SEMANTIC_EVENT_IDS["NETWORK_SEND"]
+    if value in {"EVENT_CHANGE_PRINCIPAL", "EVENT_SETUID", "EVENT_SETGID"}:
+        return _SEMANTIC_EVENT_IDS["PRIVILEGE_CHANGE"]
+    if value in {"EVENT_MMAP", "EVENT_MPROTECT", "EVENT_MUNMAP"}:
+        return _SEMANTIC_EVENT_IDS["MEMORY_CONTROL"]
+    if value in {"EVENT_SIGNAL", "EVENT_KILL", "EVENT_SHM", "EVENT_CORRELATION"}:
+        return _SEMANTIC_EVENT_IDS["IPC_OR_SIGNAL"]
+    return _SEMANTIC_EVENT_IDS["OTHER"]
+
+
+def _remap_semantic_event_histories(raw_event_counts, raw_to_canonical):
+    """Merge compact per-subject semantic histories after thread normalization."""
+    remapped = {}
+    for key, count in raw_event_counts.items():
+        if not isinstance(key, tuple) or len(key) != 2:
+            continue
+        semantic_id, raw_subject = key
+        canonical_subject = str(raw_to_canonical.get(str(raw_subject), raw_subject))
+        remapped_key = (int(semantic_id), canonical_subject)
+        remapped[remapped_key] = remapped.get(remapped_key, 0) + int(count)
+    histories = collections.defaultdict(list)
+    for (semantic_id, subject_id), count in remapped.items():
+        histories[str(subject_id)].append([int(semantic_id), int(count)])
+    return {str(subject_id): history for subject_id, history in histories.items()}
+
+def _cross_subject_object_ids(raw_subject_object_ids, canonical_subject_by_raw, known_object_ids):
+    """Keep only objects that can connect two different canonical processes.
+
+    A singleton object can never join two root-child branches, so retaining it
+    for the post-segmentation overlap pass only increases memory and scan time.
+    """
+    first_owner = {}
+    shared_object_ids = set()
+    for raw_subject_id, object_ids in raw_subject_object_ids.items():
+        canonical_subject_id = canonical_subject_by_raw.get(str(raw_subject_id), str(raw_subject_id))
+        for object_uuid in object_ids:
+            object_uuid = str(object_uuid)
+            if object_uuid not in known_object_ids:
+                continue
+            previous_owner = first_owner.get(object_uuid)
+            if previous_owner is None:
+                first_owner[object_uuid] = canonical_subject_id
+            elif previous_owner != canonical_subject_id:
+                shared_object_ids.add(object_uuid)
+
+    if not shared_object_ids:
+        return {}
+    canonical_subject_object_ids = collections.defaultdict(set)
+    for raw_subject_id, object_ids in raw_subject_object_ids.items():
+        canonical_subject_id = canonical_subject_by_raw.get(str(raw_subject_id), str(raw_subject_id))
+        retained = shared_object_ids.intersection(str(object_uuid) for object_uuid in object_ids)
+        if retained:
+            canonical_subject_object_ids[canonical_subject_id].update(retained)
+    return {
+        str(subject_id): sorted(object_ids)
+        for subject_id, object_ids in canonical_subject_object_ids.items()
+        if object_ids
+    }
+
+
+def parser_cadets(data_path, collect_subject_object_ids=False):
     data_list = os.listdir(data_path)
     event_map = {'EVENT_ACCEPT': 1, 'EVENT_CONNECT': 2, 'EVENT_EXECUTE': 3, 'EVENT_EXIT': 4, 'EVENT_READ': 5,
                  'EVENT_RECVFROM': 6, 'EVENT_RECVMSG': 7, 'EVENT_SENDTO': 8, 'EVENT_SENDMSG': 9, 'EVENT_WRITE': 10}
     subject_list = []
     object_list = []
     event_count = {}
+    # Keep a compact per-subject action tally for optional full-event statistics.
+    # Unlike event_count, this includes events outside the legacy TAPAS whitelist.
+    raw_event_action_counts = collections.defaultdict(collections.Counter)
+    raw_event_type_counts = collections.Counter()
+    raw_semantic_event_counts = {}
+    raw_subject_time_ranges = {}
+    raw_execute_object_counts = collections.defaultdict(collections.Counter)
+    raw_subject_object_ids = collections.defaultdict(set) if collect_subject_object_ids else None
     file_path = {}
     subject_rows = []
 
@@ -185,6 +302,32 @@ def parser_cadets(data_path):
                 if "com.bbn.tc.schema.avro.cdm18.Event" in event["datum"]:
                     data = event["datum"]["com.bbn.tc.schema.avro.cdm18.Event"]
                     type = data["type"]
+                    raw_event_type_counts[str(type)] += 1
+                    subject_ref = data.get("subject")
+                    if isinstance(subject_ref, dict):
+                        raw_subject_id = subject_ref.get("com.bbn.tc.schema.avro.cdm18.UUID")
+                        if raw_subject_id:
+                            raw_event_action_counts[str(raw_subject_id)][str(type)] += 1
+                            semantic_key = (_semantic_event_id(type), str(raw_subject_id))
+                            raw_semantic_event_counts[semantic_key] = raw_semantic_event_counts.get(semantic_key, 0) + 1
+                            _update_subject_time_range(
+                                raw_subject_time_ranges,
+                                raw_subject_id,
+                                _event_timestamp_seconds(data),
+                            )
+                            if str(type) == 'EVENT_EXECUTE':
+                                predicate_object = data.get('predicateObject')
+                                if isinstance(predicate_object, dict):
+                                    object_uuid = predicate_object.get('com.bbn.tc.schema.avro.cdm18.UUID')
+                                    if object_uuid:
+                                        raw_execute_object_counts[str(raw_subject_id)][str(object_uuid)] += 1
+                            if raw_subject_object_ids is not None:
+                                for object_field in ('predicateObject', 'predicateObject2'):
+                                    object_ref = data.get(object_field)
+                                    if isinstance(object_ref, dict):
+                                        object_uuid = object_ref.get('com.bbn.tc.schema.avro.cdm18.UUID')
+                                        if object_uuid:
+                                            raw_subject_object_ids[str(raw_subject_id)].add(str(object_uuid))
                     if type not in event_map:
                         continue
                     subId = data["subject"]["com.bbn.tc.schema.avro.cdm18.UUID"]
@@ -223,6 +366,7 @@ def parser_cadets(data_path):
                             "process_id": pid,
                             "tgid": _subject_tgid(data),
                             "subject_type": str(data.get("type", "")),
+                            "start_timestamp_nanos": int(data.get("startTimestampNanos", 0) or 0),
                         }
                     )
                 elif "com.bbn.tc.schema.avro.cdm18.FileObject" in event["datum"]:
@@ -256,6 +400,44 @@ def parser_cadets(data_path):
         event_count,
         {raw_uuid: owner_by_uuid.get(raw_uuid, raw_uuid) for raw_uuid in owner_by_uuid},
     )
+    canonical_event_action_counts = collections.defaultdict(collections.Counter)
+    for raw_subject_id, action_counts in raw_event_action_counts.items():
+        canonical_subject_id = owner_by_uuid.get(str(raw_subject_id), str(raw_subject_id))
+        for action, count in action_counts.items():
+            canonical_event_action_counts[canonical_subject_id][str(action)] += int(count)
+    canonical_subject_time_ranges = _canonicalize_subject_time_ranges(
+        raw_subject_time_ranges,
+        {raw_uuid: owner_by_uuid.get(raw_uuid, raw_uuid) for raw_uuid in owner_by_uuid},
+    )
+    canonical_subject_start_timestamps: dict[str, int] = {}
+    for row in subject_rows:
+        raw_subject_id = str(row["uuid"])
+        canonical_subject_id = owner_by_uuid.get(raw_subject_id, raw_subject_id)
+        start_timestamp = int(row.get("start_timestamp_nanos", 0) or 0)
+        previous = canonical_subject_start_timestamps.get(canonical_subject_id)
+        if previous is None or (start_timestamp > 0 and (previous == 0 or start_timestamp < previous)):
+            canonical_subject_start_timestamps[canonical_subject_id] = start_timestamp
+    canonical_semantic_event_histories = _remap_semantic_event_histories(
+        raw_semantic_event_counts,
+        {raw_uuid: owner_by_uuid.get(raw_uuid, raw_uuid) for raw_uuid in owner_by_uuid},
+    )
+    canonical_execute_targets = collections.defaultdict(collections.Counter)
+    for raw_subject_id, object_counts in raw_execute_object_counts.items():
+        canonical_subject_id = owner_by_uuid.get(str(raw_subject_id), str(raw_subject_id))
+        for object_uuid, count in object_counts.items():
+            target_path = str(file_path.get(str(object_uuid), '')).strip()
+            if target_path and target_path != 'Unknow':
+                canonical_execute_targets[canonical_subject_id][target_path] += int(count)
+    known_object_ids = {str(row[1]) for row in object_list if len(row) >= 2}
+    canonical_subject_object_ids = (
+        _cross_subject_object_ids(
+            raw_subject_object_ids,
+            {raw_uuid: owner_by_uuid.get(raw_uuid, raw_uuid) for raw_uuid in owner_by_uuid},
+            known_object_ids,
+        )
+        if raw_subject_object_ids is not None
+        else {}
+    )
     metadata = {
         "raw_subject_to_canonical_node": {
             raw_uuid: owner_by_uuid.get(raw_uuid, raw_uuid)
@@ -263,6 +445,20 @@ def parser_cadets(data_path):
         },
         "thread_subject_count": int(sum(1 for raw_uuid, owner_uuid in owner_by_uuid.items() if raw_uuid != owner_uuid)),
         "process_subject_count": int(len(canonical_subject_list)),
+        "canonical_event_action_counts": {
+            str(subject_id): {str(action): int(count) for action, count in action_counts.items()}
+            for subject_id, action_counts in canonical_event_action_counts.items()
+        },
+        "raw_event_type_counts": {str(action): int(count) for action, count in raw_event_type_counts.items()},
+        "semantic_event_vocabulary": {name: int(value) for name, value in _SEMANTIC_EVENT_IDS.items()},
+        "canonical_semantic_event_histories": canonical_semantic_event_histories,
+        "canonical_subject_time_ranges": canonical_subject_time_ranges,
+        "canonical_subject_start_timestamps": canonical_subject_start_timestamps,
+        "canonical_execute_targets": {
+            str(subject_id): {str(path): int(count) for path, count in targets.items()}
+            for subject_id, targets in canonical_execute_targets.items()
+        },
+        "canonical_subject_object_ids": canonical_subject_object_ids,
     }
     metadata["graph_identity_mode"] = "uuid"
     return canonical_subject_list, object_list, event_count, metadata
@@ -365,7 +561,7 @@ def parser_fivedirections(data_path):
     }
     return canonical_subject_list, object_list, event_count, metadata
 
-def parser_trace(data_path):
+def parser_trace(data_path, collect_subject_object_ids=False):
     data_list=sorted(os.listdir(data_path))
     event_map={'EVENT_RENAME': 1, 'EVENT_CONNECT': 2, 'EVENT_EXECUTE': 3, 'EVENT_EXIT': 4, 'EVENT_READ': 5,
                 'EVENT_RECVFROM': 6, 'EVENT_RECVMSG': 7, 'EVENT_SENDTO': 8, 'EVENT_SENDMSG': 9, 'EVENT_WRITE': 10, 'EVENT_CREATE_OBJECT':11}
@@ -373,6 +569,11 @@ def parser_trace(data_path):
     object_list=[]
     event_count={}
     subject_rows=[]
+    raw_subject_time_ranges = {}
+    raw_semantic_event_counts = {}
+    raw_event_type_counts = collections.Counter()
+    raw_event_action_counts = collections.defaultdict(collections.Counter)
+    raw_subject_object_ids = collections.defaultdict(set) if collect_subject_object_ids else None
     for file in tqdm(data_list, desc=f"Parsing", unit="file"):
         f=open(data_path+file,'r')
         for line in f:
@@ -386,8 +587,29 @@ def parser_trace(data_path):
                     subId = str(subject_ref.get("com.bbn.tc.schema.avro.cdm18.UUID", "")).strip()
                     if not subId:
                         continue
-                    objId=data["predicateObject"]["com.bbn.tc.schema.avro.cdm18.UUID"]
-                    type=data["type"]
+                    type=data.get("type", "")
+                    raw_event_type_counts[str(type)] += 1
+                    raw_event_action_counts[subId][str(type)] += 1
+                    semantic_key = (_semantic_event_id(type), subId)
+                    raw_semantic_event_counts[semantic_key] = raw_semantic_event_counts.get(semantic_key, 0) + 1
+                    _update_subject_time_range(
+                        raw_subject_time_ranges,
+                        subId,
+                        _event_timestamp_seconds(data),
+                    )
+                    if raw_subject_object_ids is not None:
+                        for object_field in ('predicateObject', 'predicateObject2'):
+                            object_ref = data.get(object_field)
+                            if isinstance(object_ref, dict):
+                                object_uuid = object_ref.get('com.bbn.tc.schema.avro.cdm18.UUID')
+                                if object_uuid:
+                                    raw_subject_object_ids[subId].add(str(object_uuid))
+                    predicate_object = data.get("predicateObject")
+                    if not isinstance(predicate_object, dict):
+                        continue
+                    objId=predicate_object.get("com.bbn.tc.schema.avro.cdm18.UUID")
+                    if not objId:
+                        continue
                     if type not in event_map:
                         continue
                     typeId=event_map[type]
@@ -417,6 +639,7 @@ def parser_trace(data_path):
                             "uuid": str(uuid),
                             "parentuuid": str(parentuuid),
                             "process_id": cid,
+                            "subject_type": str(data.get("type", "")),
                             "tgid": _subject_tgid(data),
                             "name": path + '/' + name,
                         }
@@ -447,6 +670,18 @@ def parser_trace(data_path):
         for raw_uuid in owner_by_uuid
     }
     event_count = _remap_event_subjects(event_count, raw_to_canonical)
+    canonical_semantic_event_histories = _remap_semantic_event_histories(raw_semantic_event_counts, raw_to_canonical)
+    canonical_event_action_counts = collections.defaultdict(collections.Counter)
+    for raw_subject_id, action_counts in raw_event_action_counts.items():
+        canonical_subject_id = raw_to_canonical.get(str(raw_subject_id), str(raw_subject_id))
+        for action, count in action_counts.items():
+            canonical_event_action_counts[canonical_subject_id][str(action)] += int(count)
+    known_object_ids = {str(row[1]) for row in object_list if len(row) >= 2}
+    canonical_subject_object_ids = (
+        _cross_subject_object_ids(raw_subject_object_ids, raw_to_canonical, known_object_ids)
+        if raw_subject_object_ids is not None
+        else {}
+    )
 
     seen_subjects = set()
     for row in subject_rows:
@@ -464,6 +699,18 @@ def parser_trace(data_path):
         "raw_subject_to_canonical_node": raw_to_canonical,
         "thread_subject_count": int(sum(1 for raw_uuid, owner_uuid in owner_by_uuid.items() if raw_uuid != owner_uuid)),
         "process_subject_count": int(len(subject_list)),
+        "canonical_event_action_counts": {
+            str(subject_id): {str(action): int(count) for action, count in action_counts.items()}
+            for subject_id, action_counts in canonical_event_action_counts.items()
+        },
+        "canonical_subject_object_ids": canonical_subject_object_ids,
+        "raw_event_type_counts": {str(action): int(count) for action, count in raw_event_type_counts.items()},
+        "semantic_event_vocabulary": {name: int(value) for name, value in _SEMANTIC_EVENT_IDS.items()},
+        "canonical_semantic_event_histories": canonical_semantic_event_histories,
+        "canonical_subject_time_ranges": _canonicalize_subject_time_ranges(
+            raw_subject_time_ranges,
+            raw_to_canonical,
+        ),
     }
     return subject_list,object_list,event_count,metadata
 
@@ -561,6 +808,34 @@ def _update_subject_time_range(subject_time_ranges, subject_uuid, timestamp_sec)
     if timestamp_sec > current[1]:
         current[1] = float(timestamp_sec)
     current[2] = int(current[2]) + 1
+
+
+def _canonicalize_subject_time_ranges(raw_subject_time_ranges, raw_to_canonical):
+    """Merge raw Subject event ranges after thread/identity normalization."""
+    canonical_ranges = {}
+    for raw_subject_id, value in raw_subject_time_ranges.items():
+        if not isinstance(value, (list, tuple)) or len(value) < 3:
+            continue
+        canonical_subject_id = str(raw_to_canonical.get(str(raw_subject_id), raw_subject_id))
+        first_seen = _to_seconds_like(value[0])
+        last_seen = _to_seconds_like(value[1])
+        if first_seen is None or last_seen is None:
+            continue
+        current = canonical_ranges.get(canonical_subject_id)
+        if current is None:
+            canonical_ranges[canonical_subject_id] = [float(first_seen), float(last_seen), int(value[2])]
+            continue
+        current[0] = min(float(current[0]), float(first_seen))
+        current[1] = max(float(current[1]), float(last_seen))
+        current[2] = int(current[2]) + int(value[2])
+    return {
+        subject_id: {
+            "first_timestamp_sec": float(value[0]),
+            "last_timestamp_sec": float(value[1]),
+            "event_count": int(value[2]),
+        }
+        for subject_id, value in canonical_ranges.items()
+    }
 
 
 def encode_cadets(sub_list, obj_list, event_list):
@@ -739,9 +1014,10 @@ def filters(
     objvec = {}
     subjhistory = {}
     raw_subject_time_ranges = {}
-    tgiddict = {}
     subjswap = {}
     subject_seen = set()
+    apg_subject_tgids = {}
+    thread_subjects_merged_by_tgid = 0
     subjhisvec = {}
     padict = {}
     chdict = {}
@@ -780,23 +1056,27 @@ def filters(
                     output = ""
                     if 'com.bbn.tc.schema.avro.cdm18.Subject' in js['datum']:
                         subject_data = js['datum']['com.bbn.tc.schema.avro.cdm18.Subject']
-                        subjectuuid = subject_data['uuid']
+                        raw_subjectuuid = subject_data['uuid']
+                        subjectuuid = raw_subjectuuid
                         parentuuid = subject_data['parentSubject']['com.bbn.tc.schema.avro.cdm18.UUID']
-                        subject_seen.add(subjectuuid)
+                        subject_seen.add(raw_subjectuuid)
                         subtgid = "Unknown"
                         if "tgid" in subject_data['properties']['map']:
                             subtgid = subject_data['properties']['map']['tgid']
 
-                        subpath = "Unknown"
-                        if "path" in subject_data['properties']['map']:
-                            subpath = subject_data['properties']['map']['path']
+                        # The TAPAS thread rule merges a Subject only when its
+                        # already-known parent has the same tgid.  Matching a
+                        # sibling's parent/tgid/path is not evidence of a thread.
+                        canonical_parent = subjswap.get(parentuuid, parentuuid)
+                        parent_tgid = apg_subject_tgids.get(parentuuid)
+                        if subtgid != "Unknown" and parent_tgid == subtgid:
+                            subjswap[raw_subjectuuid] = canonical_parent
+                            apg_subject_tgids[raw_subjectuuid] = parent_tgid
+                            thread_subjects_merged_by_tgid += 1
+                            continue
 
-                        tup = (parentuuid, subtgid, subpath)
-                        if str(tup) in tgiddict.keys():
-                            subjswap[subjectuuid] = tgiddict[str(tup)]
-                            subjectuuid = tgiddict[str(tup)]
-                        else:
-                            tgiddict[str(tup)] = subjectuuid
+                        apg_subject_tgids[raw_subjectuuid] = subtgid
+                        parentuuid = canonical_parent
                         if parentuuid == 'Unknow':
                             continue
                         if subjectuuid in chdict:
@@ -938,8 +1218,14 @@ def filters(
                     current[1] = float(value[1])
                 current[2] = int(current[2]) + int(value[2])
 
-    del tgiddict
-    del subjswap
+    thread_merge_metadata = {
+        'raw_subject_to_canonical_node': {
+            str(subject_uuid): str(subjswap.get(subject_uuid, subject_uuid))
+            for subject_uuid in subject_seen
+        },
+        'thread_merge_rule': 'parent_subject_known_and_same_tgid',
+        'thread_subjects_merged_by_tgid': int(thread_subjects_merged_by_tgid),
+    }
     del chdict
     gc.collect()
 
@@ -1009,6 +1295,7 @@ def filters(
                 }
                 for subject_uuid, value in (canonical_subject_time_ranges or {}).items()
             },
+            'parser_metadata': thread_merge_metadata,
         }, subjhisvec
     return chi_pa, subjhisvec
 

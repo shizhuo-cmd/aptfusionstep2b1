@@ -99,6 +99,8 @@ def test_theia_temporal_split_sees_direct_children_with_parent_to_child_edges() 
         branch_gap_minutes=10,
     )
 
-    assert summary["reason"] == "gap_cluster_split"
+    assert summary["reason"] == "split_applied"
     assert summary["applied"] is True
     assert len(split_components) == 2
+    assert all(edge in component["edges"] for component in split_components for edge in component["edges"])
+    assert all(edge[0] in component["nodes"] and edge[1] in component["nodes"] for component in split_components for edge in component["edges"])

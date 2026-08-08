@@ -6,6 +6,7 @@ import copy
 import csv
 import ast
 import importlib.util
+import math
 import os
 import pickle
 import random
@@ -23,6 +24,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import accuracy_score, average_precision_score, precision_recall_fscore_support, roc_auc_score
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 from sklearn.cluster import MiniBatchKMeans
+from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 from torch_geometric.loader import DataLoader
@@ -34,7 +36,14 @@ except Exception:  # pragma: no cover - optional dependency
 
 from ..common import ensure_dir, ensure_parent, save_json
 from ..config import FusionConfig
-from .ocr_stat_features import extract_process_stat_features, extract_process_stat_features_from_tc3_event_count
+from .ocr_stat_features import (
+    extract_process_stat_features,
+    extract_process_stat_features_from_tc3_action_counts,
+    extract_process_stat_features_from_tc3_event_count,
+)
+from .semantic_sequence import fit_benign_semantic_sequence_encoder
+from .normal_only_gnn import run_normal_only_gin_autoencoder
+from .provgrp_paper_partition import apply_provgrp_paper_partition_to_edge_list
 
 _WORKSPACE_DIRNAME = "tapas_native_workspace"
 _NATIVE_GRAPH_FILENAME = "tapas_native_graphs.pt"
@@ -137,6 +146,11 @@ def _graphsage_node_feature_sources(cfg: FusionConfig) -> dict[str, bool]:
     return {
         "sequence_embeddings": bool(cfg.use_sequence_embeddings),
         "ocr_stat_features": bool(_graphsage_uses_stat_features(cfg)),
+        "tc3_full_event_stats": bool(
+            cfg.dataset_family == "tc3"
+            and cfg.task_tc3_event_stats_mode in {"core", "extended", "security_semantic"}
+            and _graphsage_uses_stat_features(cfg)
+        ),
     }
 
 
@@ -620,13 +634,16 @@ def _decompose_tc3_metadata(
             node_ids = [str(node) for node in component.get("nodes", [])]
             if len(node_ids) < 2:
                 continue
-            attacknum = sum(1 for node in node_ids if str(node) in ground_truth)
+            original_node_ids = [str(node) for node in component.get("original_nodes", node_ids)]
+            attacknum = sum(1 for node in original_node_ids if str(node) in ground_truth)
             payload = {
                 "task_id": f"task_{task_index:04d}",
                 "node_ids": node_ids,
                 "label": 1 if attacknum > 0 else 0,
                 "attacknum": attacknum,
                 "task_size": len(node_ids),
+                "original_task_size": len(original_node_ids),
+                "original_node_ids": original_node_ids,
                 "internal_edge_count": len(component.get("edges", [])),
                 "task_root_id": str(component.get("task_root", "")),
                 "boundary_node_ids": [str(node) for node in component.get("boundary_nodes", [])],
@@ -659,6 +676,45 @@ def _decompose_tc3_metadata(
                 "temporal_component_last_timestamp_sec",
                 "temporal_component_span_minutes",
                 "temporal_component_root_retained",
+                "root_temporal_split_applied",
+                "root_temporal_parent_task_root",
+                "root_temporal_cluster_index",
+                "root_temporal_cluster_count",
+                "root_temporal_child_roots",
+                "root_temporal_component_first_timestamp_sec",
+                "root_temporal_component_last_timestamp_sec",
+                "root_temporal_component_span_minutes",
+                "root_temporal_root_retained",
+                "temporal_episode_split_applied",
+                "temporal_episode_parent_task_root",
+                "temporal_episode_index",
+                "temporal_episode_count",
+                "temporal_episode_child_roots",
+                "temporal_episode_first_child_timestamp_sec",
+                "temporal_episode_last_child_timestamp_sec",
+                "temporal_episode_child_span_minutes",
+                "temporal_episode_root_retained",
+                "synthetic_root_isolation_applied",
+                "synthetic_root_isolation_parent_root",
+                "synthetic_root_isolation_child_root",
+                "synthetic_root_isolation_direct_child_count",
+                "synthetic_root_isolation_parent_task_size",
+                "branch_object_overlap_split_applied",
+                "branch_object_overlap_parent_task_root",
+                "branch_object_overlap_group_index",
+                "branch_object_overlap_group_count",
+                "branch_object_overlap_child_roots",
+                "provgrp_paper_partition_applied",
+                "provgrp_paper_parent_task_root",
+                "provgrp_paper_partition_index",
+                "provgrp_paper_partition_count",
+                "provgrp_paper_incoming_cluster_id",
+                "provgrp_paper_outgoing_cluster_id",
+                "provgrp_paper_incoming_event_count",
+                "provgrp_paper_outgoing_event_count",
+                "provgrp_paper_member_child_roots",
+                "provgrp_paper_member_child_count",
+                "provgrp_paper_original_root_child_count",
             ]:
                 if key in component:
                     payload[key] = copy.deepcopy(component[key])
@@ -735,6 +791,23 @@ def _decompose_tc3_metadata(
         )
         task_index += 1
     return data
+
+
+def _semantic_sequence_train_subject_ids(cfg: FusionConfig, graph_metas: Sequence[dict[str, Any]]) -> set[str]:
+    """Mirror normal-only temporal splitting before fitting the sequence encoder."""
+    benign_metas = [meta for meta in graph_metas if int(meta.get("label", 0)) == 0]
+    benign_metas.sort(
+        key=lambda meta: (
+            _normal_only_timestamp(meta) is None,
+            _normal_only_timestamp(meta) or 0.0,
+            str(meta.get("task_id", "")),
+        )
+    )
+    train_count = max(1, int(np.floor(len(benign_metas) * float(cfg.task_normal_only_train_fraction))))
+    subjects: set[str] = set()
+    for meta in benign_metas[:train_count]:
+        subjects.update(str(node) for node in meta.get("node_ids", []))
+    return subjects
 
 
 def _canonicalize_ground_truth_nodes(
@@ -948,9 +1021,50 @@ def _build_task_component_diagnostics_from_components(
             "temporal_component_last_timestamp_sec",
             "temporal_component_span_minutes",
             "temporal_component_root_retained",
+            "root_temporal_split_applied",
+            "root_temporal_parent_task_root",
+            "root_temporal_cluster_index",
+            "root_temporal_cluster_count",
+            "root_temporal_child_roots",
+            "root_temporal_component_first_timestamp_sec",
+            "root_temporal_component_last_timestamp_sec",
+            "root_temporal_component_span_minutes",
+            "root_temporal_root_retained",
+            "temporal_episode_split_applied",
+            "temporal_episode_parent_task_root",
+            "temporal_episode_index",
+            "temporal_episode_count",
+            "temporal_episode_child_roots",
+            "temporal_episode_first_child_timestamp_sec",
+            "temporal_episode_last_child_timestamp_sec",
+            "temporal_episode_child_span_minutes",
+            "temporal_episode_root_retained",
+            "synthetic_root_isolation_applied",
+            "synthetic_root_isolation_parent_root",
+            "synthetic_root_isolation_child_root",
+            "synthetic_root_isolation_direct_child_count",
+            "synthetic_root_isolation_parent_task_size",
+            "branch_object_overlap_split_applied",
+            "branch_object_overlap_parent_task_root",
+            "branch_object_overlap_group_index",
+            "branch_object_overlap_group_count",
+            "branch_object_overlap_child_roots",
+            "provgrp_paper_partition_applied",
+            "provgrp_paper_parent_task_root",
+            "provgrp_paper_partition_index",
+            "provgrp_paper_partition_count",
+            "provgrp_paper_incoming_cluster_id",
+            "provgrp_paper_outgoing_cluster_id",
+            "provgrp_paper_incoming_event_count",
+            "provgrp_paper_outgoing_event_count",
+            "provgrp_paper_member_child_roots",
+            "provgrp_paper_member_child_count",
+            "provgrp_paper_original_root_child_count",
         ]:
             if key in component:
                 row[key] = copy.deepcopy(component[key])
+        if "root_temporal_task_root_parent_missing" in component:
+            row["task_root_parent_missing"] = bool(component["root_temporal_task_root_parent_missing"])
         diagnostics.append(row)
     return diagnostics
 
@@ -1065,18 +1179,18 @@ def _maybe_temporally_split_theia_component(
                 timed_last_values.append(float(info["last_timestamp_sec"]))
 
         cluster_edges = [
-            [child, parent]
-            for child, parent in original_edges
-            if child in cluster_nodes and parent in cluster_nodes
+            [parent, child]
+            for parent, child in original_edges
+            if parent in cluster_nodes and child in cluster_nodes
         ]
         root_retained = False
         if not cluster_edges:
             nodes_with_root = set(cluster_nodes)
             nodes_with_root.add(root)
             fallback_edges = [
-                [child, parent]
-                for child, parent in original_edges
-                if child in nodes_with_root and parent in nodes_with_root
+                [parent, child]
+                for parent, child in original_edges
+                if parent in nodes_with_root and child in nodes_with_root
             ]
             if not fallback_edges:
                 continue
@@ -1195,6 +1309,1130 @@ def _apply_theia_temporal_split(
     return updated
 
 
+def _maybe_temporally_split_root_component(
+    component: dict[str, Any],
+    subject_time_ranges: dict[str, Any],
+    *,
+    task_root_parent_missing: bool,
+    min_task_nodes: int,
+    min_direct_children: int,
+    max_span_minutes: int,
+    branch_gap_minutes: int,
+    session_max_minutes: int,
+    max_sessions: int = 0,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Split only a large parent-missing root into time-local child-branch sessions."""
+    root = str(component.get("task_root", "")).strip()
+    nodes = [str(node) for node in component.get("nodes", [])]
+    component_first, component_last = _component_node_time_range(nodes, subject_time_ranges)
+    span_seconds = (
+        max(0.0, component_last - component_first)
+        if component_first is not None and component_last is not None
+        else None
+    )
+    summary = {
+        "applied": False,
+        "task_root": root,
+        "component_span_minutes": (span_seconds / 60.0) if span_seconds is not None else None,
+        "cluster_count": 0,
+        "reason": "component_not_eligible",
+    }
+    if not task_root_parent_missing:
+        summary["reason"] = "root_has_known_parent"
+        return [component], summary
+    if root == "":
+        summary["reason"] = "missing_task_root"
+        return [component], summary
+    if len(nodes) < int(min_task_nodes):
+        summary["reason"] = "below_min_task_nodes"
+        return [component], summary
+    if span_seconds is None:
+        summary["reason"] = "missing_component_time_range"
+        return [component], summary
+    if span_seconds <= float(max_span_minutes) * 60.0:
+        summary["reason"] = "within_max_span"
+        return [component], summary
+
+    children_map = _component_children_map(component)
+    direct_children = children_map.get(root, [])
+    if len(direct_children) < int(min_direct_children):
+        summary["reason"] = "below_min_direct_children"
+        return [component], summary
+
+    branch_infos: list[dict[str, Any]] = []
+    for child in direct_children:
+        subtree_nodes = _collect_component_subtree(child, children_map)
+        first_seen, last_seen = _component_node_time_range(sorted(subtree_nodes), subject_time_ranges)
+        branch_infos.append(
+            {
+                "child_root": str(child),
+                "nodes": subtree_nodes,
+                "first_timestamp_sec": first_seen,
+                "last_timestamp_sec": last_seen,
+            }
+        )
+
+    timed_infos = [
+        info
+        for info in branch_infos
+        if info["first_timestamp_sec"] is not None and info["last_timestamp_sec"] is not None
+    ]
+    if len(timed_infos) < 2:
+        summary["reason"] = "insufficient_timed_children"
+        return [component], summary
+    timed_infos.sort(
+        key=lambda info: (
+            float(info["first_timestamp_sec"]),
+            float(info["last_timestamp_sec"]),
+            str(info["child_root"]),
+        )
+    )
+
+    gap_seconds = max(0, int(branch_gap_minutes)) * 60.0
+    session_cap_seconds = max(0, int(session_max_minutes)) * 60.0
+    clusters: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_first: float | None = None
+    current_last: float | None = None
+    for info in timed_infos:
+        branch_first = float(info["first_timestamp_sec"])
+        branch_last = float(info["last_timestamp_sec"])
+        if not current:
+            current = [info]
+            current_first = branch_first
+            current_last = branch_last
+            continue
+        split_on_gap = gap_seconds > 0 and current_last is not None and branch_first - current_last >= gap_seconds
+        split_on_cap = (
+            session_cap_seconds > 0
+            and current_first is not None
+            and branch_first - current_first > session_cap_seconds
+        )
+        if split_on_gap or split_on_cap:
+            clusters.append(current)
+            current = [info]
+            current_first = branch_first
+            current_last = branch_last
+            continue
+        current.append(info)
+        current_last = max(float(current_last or branch_last), branch_last)
+    if current:
+        clusters.append(current)
+    if len(clusters) < 2:
+        summary["reason"] = "single_temporal_session"
+        return [component], summary
+
+    initial_cluster_count = len(clusters)
+    if max_sessions > 0 and len(clusters) > int(max_sessions):
+        # Preserve temporal order while bounding fragmentation of a synthetic root.
+        # This is intentionally post-clustering: a session boundary is never crossed
+        # by reordering branches, only adjacent sessions are coalesced.
+        cluster_width = math.ceil(len(clusters) / int(max_sessions))
+        clusters = [
+            [info for session in clusters[index:index + cluster_width] for info in session]
+            for index in range(0, len(clusters), cluster_width)
+        ]
+
+    # Preserve branches without event times in a deterministic session instead of discarding them.
+    untimed_infos = [
+        info
+        for info in branch_infos
+        if info["first_timestamp_sec"] is None or info["last_timestamp_sec"] is None
+    ]
+    for index, info in enumerate(untimed_infos):
+        clusters[index % len(clusters)].append(info)
+
+    original_boundary_nodes = {str(node) for node in component.get("boundary_nodes", [])}
+    original_edges = [
+        [str(edge[0]), str(edge[1])]
+        for edge in component.get("edges", [])
+        if isinstance(edge, (list, tuple)) and len(edge) >= 2
+    ]
+    new_components: list[dict[str, Any]] = []
+    for cluster_index, cluster_infos in enumerate(clusters):
+        cluster_nodes = {root}
+        cluster_child_roots: list[str] = []
+        timed_first_values: list[float] = []
+        timed_last_values: list[float] = []
+        for info in cluster_infos:
+            cluster_nodes.update(str(node) for node in info["nodes"])
+            cluster_child_roots.append(str(info["child_root"]))
+            if info["first_timestamp_sec"] is not None and info["last_timestamp_sec"] is not None:
+                timed_first_values.append(float(info["first_timestamp_sec"]))
+                timed_last_values.append(float(info["last_timestamp_sec"]))
+        cluster_edges = [
+            [parent, child]
+            for parent, child in original_edges
+            if parent in cluster_nodes and child in cluster_nodes
+        ]
+        if len(cluster_nodes) < 2 or not cluster_edges:
+            continue
+        new_components.append(
+            {
+                "task_root": root,
+                "nodes": sorted(cluster_nodes),
+                "edges": cluster_edges,
+                "boundary_nodes": sorted(original_boundary_nodes | {root}),
+                "root_temporal_split_applied": True,
+                "root_temporal_parent_task_root": root,
+                "root_temporal_cluster_index": int(cluster_index),
+                "root_temporal_cluster_count": int(len(clusters)),
+                "root_temporal_child_roots": cluster_child_roots,
+                "root_temporal_component_first_timestamp_sec": min(timed_first_values) if timed_first_values else None,
+                "root_temporal_component_last_timestamp_sec": max(timed_last_values) if timed_last_values else None,
+                "root_temporal_component_span_minutes": (
+                    (max(timed_last_values) - min(timed_first_values)) / 60.0
+                    if timed_first_values and timed_last_values
+                    else None
+                ),
+                "root_temporal_root_retained": True,
+                "root_temporal_task_root_parent_missing": True,
+            }
+        )
+    if len(new_components) < 2:
+        summary["reason"] = "split_components_not_viable"
+        return [component], summary
+    summary.update(
+        {
+            "applied": True,
+            "cluster_count": len(new_components),
+            "initial_cluster_count": int(initial_cluster_count),
+            "reason": "split_applied",
+        }
+    )
+    return new_components, summary
+
+
+def _apply_root_temporal_split(
+    edge_list: Any,
+    *,
+    min_task_nodes: int,
+    min_direct_children: int,
+    max_span_minutes: int,
+    branch_gap_minutes: int,
+    session_max_minutes: int,
+    max_sessions: int = 0,
+) -> Any:
+    """Apply root-aware session splitting to TC3 parent-missing task components."""
+    if not isinstance(edge_list, dict):
+        return edge_list
+    task_components = list(edge_list.get("task_components", []))
+    subject_time_ranges = edge_list.get("subject_time_ranges", {})
+    diagnostics = list(edge_list.get("task_component_diagnostics", []))
+    if not task_components or not isinstance(subject_time_ranges, dict):
+        return edge_list
+    parent_missing_by_root = {
+        str(row.get("task_root", "")): bool(row.get("task_root_parent_missing", False))
+        for row in diagnostics
+        if isinstance(row, dict)
+    }
+    new_components: list[dict[str, Any]] = []
+    split_summaries: list[dict[str, Any]] = []
+    applied_count = 0
+    for component in task_components:
+        root = str(component.get("task_root", ""))
+        component_splits, split_summary = _maybe_temporally_split_root_component(
+            component,
+            subject_time_ranges,
+            task_root_parent_missing=parent_missing_by_root.get(root, False),
+            min_task_nodes=min_task_nodes,
+            min_direct_children=min_direct_children,
+            max_span_minutes=max_span_minutes,
+            branch_gap_minutes=branch_gap_minutes,
+            session_max_minutes=session_max_minutes,
+            max_sessions=max_sessions,
+        )
+        if split_summary.get("applied"):
+            applied_count += 1
+        new_components.extend(component_splits)
+        split_summaries.append(split_summary)
+    updated = dict(edge_list)
+    updated["root_temporal_split_summary"] = {
+        "enabled": True,
+        "min_task_nodes": int(min_task_nodes),
+        "min_direct_children": int(min_direct_children),
+        "max_span_minutes": int(max_span_minutes),
+        "branch_gap_minutes": int(branch_gap_minutes),
+        "session_max_minutes": int(session_max_minutes),
+        "max_sessions": int(max_sessions),
+        "input_component_count": len(task_components),
+        "output_component_count": len(new_components),
+        "split_component_count": int(applied_count),
+        "component_summaries": split_summaries,
+    }
+    if applied_count == 0:
+        return updated
+    rebuilt_edges: list[list[str]] = []
+    edge_seen: set[tuple[str, str]] = set()
+    for component in new_components:
+        for edge in component.get("edges", []):
+            if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+                continue
+            edge_key = (str(edge[0]), str(edge[1]))
+            if edge_key in edge_seen:
+                continue
+            edge_seen.add(edge_key)
+            rebuilt_edges.append([edge_key[0], edge_key[1]])
+    updated["edge_list"] = rebuilt_edges
+    updated["task_components"] = new_components
+    updated["task_component_diagnostics"] = _build_task_component_diagnostics_from_components(
+        new_components,
+        child_threshold=int(edge_list.get("child_threshold", 0) or 0),
+        split_mode=str(edge_list.get("split_mode", "fanout") or "fanout"),
+        count_segmented_children_upstream=bool(edge_list.get("count_segmented_children_upstream", False)),
+    )
+    return updated
+
+
+def _temporal_episode_gap_seconds(
+    timestamps: Sequence[float],
+    *,
+    mode: str,
+    fixed_gap_minutes: int,
+    gap_quantile: float,
+    mad_multiplier: float,
+) -> float | None:
+    """Return a robust child-start gap threshold for one parent task component."""
+    if len(timestamps) < 2:
+        return None
+    gaps = [
+        max(0.0, float(timestamps[index + 1]) - float(timestamps[index]))
+        for index in range(len(timestamps) - 1)
+    ]
+    positive_gaps = [gap for gap in gaps if gap > 0.0]
+    if not positive_gaps:
+        return None
+    normalized_mode = str(mode or "median_mad").strip().lower()
+    if normalized_mode == "fixed":
+        return max(0.0, float(fixed_gap_minutes) * 60.0)
+    if normalized_mode == "quantile":
+        return float(np.quantile(np.asarray(positive_gaps, dtype=np.float64), np.clip(gap_quantile, 0.0, 1.0)))
+    median_gap = float(np.median(np.asarray(positive_gaps, dtype=np.float64)))
+    mad_gap = float(np.median(np.abs(np.asarray(positive_gaps, dtype=np.float64) - median_gap)))
+    return median_gap + max(0.0, float(mad_multiplier)) * mad_gap
+
+
+def _coalesce_temporal_episode_groups(
+    groups: list[list[dict[str, Any]]],
+    *,
+    min_children_per_episode: int,
+    max_episodes: int,
+    budget_strategy: str,
+) -> list[list[dict[str, Any]]]:
+    """Merge only adjacent groups so temporal order and task locality are preserved."""
+    output = [list(group) for group in groups if group]
+    minimum = max(1, int(min_children_per_episode))
+    while len(output) > 1:
+        small_index = next((index for index, group in enumerate(output) if len(group) < minimum), None)
+        if small_index is None:
+            break
+        if small_index == 0:
+            output[1] = output[0] + output[1]
+            del output[0]
+        else:
+            output[small_index - 1].extend(output[small_index])
+            del output[small_index]
+    if max_episodes > 0 and len(output) > int(max_episodes):
+        if str(budget_strategy or "adjacent_greedy").strip().lower() == "balanced_child_count":
+            # When a burst yields thousands of tiny time clusters, preserve the
+            # child-start order but distribute branches evenly across the fixed
+            # episode budget.  This avoids one residual giant task.
+            ordered = [info for group in output for info in group]
+            width = max(1, math.ceil(len(ordered) / int(max_episodes)))
+            return [ordered[index:index + width] for index in range(0, len(ordered), width)]
+        while len(output) > int(max_episodes):
+            merge_index = min(
+                range(len(output) - 1),
+                key=lambda index: len(output[index]) + len(output[index + 1]),
+            )
+            output[merge_index].extend(output[merge_index + 1])
+            del output[merge_index + 1]
+    return output
+
+
+def _maybe_temporally_split_component_by_child_start(
+    component: dict[str, Any],
+    subject_time_ranges: dict[str, Any],
+    *,
+    task_root_parent_missing: bool,
+    parent_missing_only: bool,
+    min_task_nodes: int,
+    min_direct_children: int,
+    min_span_minutes: int,
+    gap_mode: str,
+    fixed_gap_minutes: int,
+    gap_quantile: float,
+    mad_multiplier: float,
+    min_children_per_episode: int,
+    max_episodes: int,
+    budget_strategy: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Partition a high-fanout task by direct-child start episodes.
+
+    Unlike the older root-session experiment, clustering uses each direct
+    child's own first observed event.  Descendant activity is intentionally
+    excluded from the clustering clock so a long-lived child cannot bridge two
+    independent parent episodes.
+    """
+    root = str(component.get("task_root", "")).strip()
+    nodes = [str(node) for node in component.get("nodes", [])]
+    summary: dict[str, Any] = {
+        "applied": False,
+        "task_root": root,
+        "input_task_size": len(nodes),
+        "reason": "component_not_eligible",
+    }
+    if not root:
+        summary["reason"] = "missing_task_root"
+        return [component], summary
+    if parent_missing_only and not task_root_parent_missing:
+        summary["reason"] = "root_has_known_parent"
+        return [component], summary
+    if len(nodes) < int(min_task_nodes):
+        summary["reason"] = "below_min_task_nodes"
+        return [component], summary
+
+    children_map = _component_children_map(component)
+    direct_children = list(dict.fromkeys(children_map.get(root, [])))
+    if len(direct_children) < int(min_direct_children):
+        summary["reason"] = "below_min_direct_children"
+        return [component], summary
+
+    timed_infos: list[dict[str, Any]] = []
+    untimed_infos: list[dict[str, Any]] = []
+    for child in direct_children:
+        child_id = str(child)
+        row = subject_time_ranges.get(child_id)
+        child_start = _float_or_none(row.get("first_timestamp_sec")) if isinstance(row, dict) else None
+        info = {
+            "child_root": child_id,
+            "nodes": _collect_component_subtree(child_id, children_map),
+            "first_timestamp_sec": child_start,
+        }
+        if child_start is None:
+            untimed_infos.append(info)
+        else:
+            timed_infos.append(info)
+    if len(timed_infos) < 2:
+        summary["reason"] = "insufficient_timed_children"
+        return [component], summary
+
+    timed_infos.sort(key=lambda info: (float(info["first_timestamp_sec"]), str(info["child_root"])))
+    timestamps = [float(info["first_timestamp_sec"]) for info in timed_infos]
+    span_seconds = timestamps[-1] - timestamps[0]
+    summary["timed_direct_child_count"] = len(timed_infos)
+    summary["untimed_direct_child_count"] = len(untimed_infos)
+    summary["child_start_span_minutes"] = span_seconds / 60.0
+    if span_seconds < max(0, int(min_span_minutes)) * 60.0:
+        summary["reason"] = "within_min_child_start_span"
+        return [component], summary
+
+    gap_seconds = _temporal_episode_gap_seconds(
+        timestamps,
+        mode=gap_mode,
+        fixed_gap_minutes=fixed_gap_minutes,
+        gap_quantile=gap_quantile,
+        mad_multiplier=mad_multiplier,
+    )
+    if gap_seconds is None or gap_seconds <= 0.0:
+        summary["reason"] = "no_positive_gap_threshold"
+        return [component], summary
+
+    raw_groups: list[list[dict[str, Any]]] = [[timed_infos[0]]]
+    for previous, current in zip(timed_infos, timed_infos[1:]):
+        gap = float(current["first_timestamp_sec"]) - float(previous["first_timestamp_sec"])
+        if gap > gap_seconds:
+            raw_groups.append([current])
+        else:
+            raw_groups[-1].append(current)
+    if len(raw_groups) < 2:
+        summary.update({"reason": "single_temporal_episode", "gap_threshold_minutes": gap_seconds / 60.0})
+        return [component], summary
+
+    # Keep missing timestamps in one deterministic group and coalesce it below;
+    # this preserves every branch without using a fabricated time value.
+    if untimed_infos:
+        raw_groups.append(untimed_infos)
+    groups = _coalesce_temporal_episode_groups(
+        raw_groups,
+        min_children_per_episode=min_children_per_episode,
+        max_episodes=max_episodes,
+        budget_strategy=budget_strategy,
+    )
+    if len(groups) < 2:
+        summary.update({"reason": "groups_coalesced_to_one", "gap_threshold_minutes": gap_seconds / 60.0})
+        return [component], summary
+
+    original_boundary_nodes = {str(node) for node in component.get("boundary_nodes", [])}
+    original_edges = [
+        [str(edge[0]), str(edge[1])]
+        for edge in component.get("edges", [])
+        if isinstance(edge, (list, tuple)) and len(edge) >= 2
+    ]
+    output: list[dict[str, Any]] = []
+    for episode_index, infos in enumerate(groups):
+        episode_nodes = {root}
+        child_roots: list[str] = []
+        child_times: list[float] = []
+        for info in infos:
+            episode_nodes.update(str(node) for node in info["nodes"])
+            child_roots.append(str(info["child_root"]))
+            if info["first_timestamp_sec"] is not None:
+                child_times.append(float(info["first_timestamp_sec"]))
+        episode_edges = [
+            [parent, child]
+            for parent, child in original_edges
+            if parent in episode_nodes and child in episode_nodes
+        ]
+        if len(episode_nodes) < 2 or not episode_edges:
+            continue
+        output.append(
+            {
+                "task_root": root,
+                "nodes": sorted(episode_nodes),
+                "edges": episode_edges,
+                "boundary_nodes": sorted(original_boundary_nodes | {root}),
+                "temporal_episode_split_applied": True,
+                "temporal_episode_parent_task_root": root,
+                "temporal_episode_index": int(episode_index),
+                "temporal_episode_count": int(len(groups)),
+                "temporal_episode_child_roots": child_roots,
+                "temporal_episode_first_child_timestamp_sec": min(child_times) if child_times else None,
+                "temporal_episode_last_child_timestamp_sec": max(child_times) if child_times else None,
+                "temporal_episode_child_span_minutes": (
+                    (max(child_times) - min(child_times)) / 60.0 if len(child_times) >= 2 else 0.0
+                ),
+                "temporal_episode_root_retained": True,
+            }
+        )
+    if len(output) < 2:
+        summary["reason"] = "split_components_not_viable"
+        return [component], summary
+    summary.update(
+        {
+            "applied": True,
+            "reason": "split_applied",
+            "gap_threshold_minutes": gap_seconds / 60.0,
+            "raw_episode_count": len(raw_groups),
+            "episode_count": len(output),
+        }
+    )
+    return output, summary
+
+
+def _apply_temporal_episode_split(
+    edge_list: Any,
+    *,
+    parent_missing_only: bool,
+    min_task_nodes: int,
+    min_direct_children: int,
+    min_span_minutes: int,
+    gap_mode: str,
+    fixed_gap_minutes: int,
+    gap_quantile: float,
+    mad_multiplier: float,
+    min_children_per_episode: int,
+    max_episodes: int,
+    budget_strategy: str,
+) -> Any:
+    """Apply bounded LogKernel-inspired child-start segmentation to TC3 tasks."""
+    if not isinstance(edge_list, dict):
+        return edge_list
+    task_components = list(edge_list.get("task_components", []))
+    subject_time_ranges = edge_list.get("subject_time_ranges", {})
+    diagnostics = list(edge_list.get("task_component_diagnostics", []))
+    if not task_components or not isinstance(subject_time_ranges, dict):
+        return edge_list
+    parent_missing_by_root = {
+        str(row.get("task_root", "")): bool(row.get("task_root_parent_missing", False))
+        for row in diagnostics
+        if isinstance(row, dict)
+    }
+    output: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    applied_count = 0
+    for component in task_components:
+        root = str(component.get("task_root", ""))
+        splits, summary = _maybe_temporally_split_component_by_child_start(
+            component,
+            subject_time_ranges,
+            task_root_parent_missing=parent_missing_by_root.get(root, False),
+            parent_missing_only=parent_missing_only,
+            min_task_nodes=min_task_nodes,
+            min_direct_children=min_direct_children,
+            min_span_minutes=min_span_minutes,
+            gap_mode=gap_mode,
+            fixed_gap_minutes=fixed_gap_minutes,
+            gap_quantile=gap_quantile,
+            mad_multiplier=mad_multiplier,
+            min_children_per_episode=min_children_per_episode,
+            max_episodes=max_episodes,
+            budget_strategy=budget_strategy,
+        )
+        if summary.get("applied"):
+            applied_count += 1
+        output.extend(splits)
+        summaries.append(summary)
+    updated = dict(edge_list)
+    updated["temporal_episode_split_summary"] = {
+        "enabled": True,
+        "parent_missing_only": bool(parent_missing_only),
+        "min_task_nodes": int(min_task_nodes),
+        "min_direct_children": int(min_direct_children),
+        "min_span_minutes": int(min_span_minutes),
+        "gap_mode": str(gap_mode),
+        "fixed_gap_minutes": int(fixed_gap_minutes),
+        "gap_quantile": float(gap_quantile),
+        "mad_multiplier": float(mad_multiplier),
+        "min_children_per_episode": int(min_children_per_episode),
+        "max_episodes": int(max_episodes),
+        "budget_strategy": str(budget_strategy),
+        "input_component_count": len(task_components),
+        "output_component_count": len(output),
+        "split_component_count": int(applied_count),
+        "component_summaries": summaries,
+    }
+    if applied_count == 0:
+        return updated
+    rebuilt_edges: list[list[str]] = []
+    edge_seen: set[tuple[str, str]] = set()
+    for component in output:
+        for edge in component.get("edges", []):
+            if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+                continue
+            edge_key = (str(edge[0]), str(edge[1]))
+            if edge_key not in edge_seen:
+                edge_seen.add(edge_key)
+                rebuilt_edges.append([edge_key[0], edge_key[1]])
+    updated["edge_list"] = rebuilt_edges
+    updated["task_components"] = output
+    updated["task_component_diagnostics"] = _build_task_component_diagnostics_from_components(
+        output,
+        child_threshold=int(edge_list.get("child_threshold", 0) or 0),
+        split_mode=str(edge_list.get("split_mode", "fanout") or "fanout"),
+        count_segmented_children_upstream=bool(edge_list.get("count_segmented_children_upstream", False)),
+    )
+    return updated
+
+
+def _maybe_isolate_synthetic_root_component(
+    component: dict[str, Any],
+    *,
+    task_root_parent_missing: bool,
+    subject_start_timestamps: dict[str, Any],
+    min_task_nodes: int,
+    min_direct_children: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Replace an oversized parent-missing collector root with child tasks.
+
+    TC3 CADETS contains parentless, zero-start synthetic subjects that collect
+    many unrelated services.  They are ingestion boundaries, not processes
+    that coordinate a common task, so their direct child subtrees are emitted
+    independently while retaining the root as a boundary-only node.
+    """
+    root = str(component.get("task_root", "")).strip()
+    children_map = _component_children_map(component)
+    direct_children = list(dict.fromkeys(children_map.get(root, [])))
+    summary = {
+        "task_root": root,
+        "input_task_size": len(component.get("nodes", [])),
+        "direct_child_count": len(direct_children),
+        "applied": False,
+        "reason": "not_parent_missing",
+    }
+    if not task_root_parent_missing:
+        return [component], summary
+    root_start_timestamp = subject_start_timestamps.get(root)
+    try:
+        is_synthetic_start = int(root_start_timestamp) == 0
+    except (TypeError, ValueError):
+        is_synthetic_start = False
+    if not is_synthetic_start:
+        summary["reason"] = "root_start_not_zero"
+        return [component], summary
+    if len(component.get("nodes", [])) < int(min_task_nodes):
+        summary["reason"] = "below_min_task_nodes"
+        return [component], summary
+    if len(direct_children) < int(min_direct_children):
+        summary["reason"] = "below_min_direct_children"
+        return [component], summary
+
+    original_edges = [
+        [str(edge[0]), str(edge[1])]
+        for edge in component.get("edges", [])
+        if isinstance(edge, (list, tuple)) and len(edge) >= 2
+    ]
+    original_boundary_nodes = {str(node) for node in component.get("boundary_nodes", [])}
+    new_components: list[dict[str, Any]] = []
+    skipped_boundary_children = 0
+    for child in direct_children:
+        # A segmented child already has its own component.  Do not create a
+        # root-only duplicate of that component.
+        if child in original_boundary_nodes:
+            skipped_boundary_children += 1
+            continue
+        branch_nodes = _collect_component_subtree(child, children_map)
+        branch_nodes.add(root)
+        branch_edges = [
+            [parent, descendant]
+            for parent, descendant in original_edges
+            if parent in branch_nodes and descendant in branch_nodes
+        ]
+        if len(branch_nodes) < 2 or not branch_edges:
+            continue
+        new_components.append(
+            {
+                "task_root": child,
+                "nodes": sorted(branch_nodes),
+                "edges": branch_edges,
+                "boundary_nodes": sorted(original_boundary_nodes | {root}),
+                "synthetic_root_isolation_applied": True,
+                "synthetic_root_isolation_parent_root": root,
+                "synthetic_root_isolation_child_root": child,
+                "synthetic_root_isolation_direct_child_count": len(direct_children),
+                "synthetic_root_isolation_parent_task_size": len(component.get("nodes", [])),
+            }
+        )
+    if len(new_components) < 2:
+        summary["reason"] = "isolated_components_not_viable"
+        return [component], summary
+    summary.update(
+        {
+            "applied": True,
+            "reason": "synthetic_root_isolated",
+            "output_component_count": len(new_components),
+            "skipped_existing_boundary_children": skipped_boundary_children,
+        }
+    )
+    return new_components, summary
+
+
+def _apply_synthetic_root_isolation(
+    edge_list: Any,
+    *,
+    min_task_nodes: int,
+    min_direct_children: int,
+) -> Any:
+    """Isolate direct child branches beneath synthetic CADETS collector roots."""
+    if not isinstance(edge_list, dict):
+        return edge_list
+    task_components = list(edge_list.get("task_components", []))
+    diagnostics = list(edge_list.get("task_component_diagnostics", []))
+    subject_start_timestamps = edge_list.get("subject_start_timestamps", {})
+    if not task_components:
+        return edge_list
+    if not isinstance(subject_start_timestamps, dict):
+        return edge_list
+    parent_missing_by_root = {
+        str(row.get("task_root", "")): bool(row.get("task_root_parent_missing", False))
+        for row in diagnostics
+        if isinstance(row, dict)
+    }
+    new_components: list[dict[str, Any]] = []
+    component_summaries: list[dict[str, Any]] = []
+    applied_count = 0
+    for component in task_components:
+        root = str(component.get("task_root", ""))
+        isolated_components, summary = _maybe_isolate_synthetic_root_component(
+            component,
+            task_root_parent_missing=parent_missing_by_root.get(root, False),
+            subject_start_timestamps=subject_start_timestamps,
+            min_task_nodes=min_task_nodes,
+            min_direct_children=min_direct_children,
+        )
+        if summary.get("applied"):
+            applied_count += 1
+        new_components.extend(isolated_components)
+        component_summaries.append(summary)
+
+    updated = dict(edge_list)
+    updated["synthetic_root_isolation_summary"] = {
+        "enabled": True,
+        "min_task_nodes": int(min_task_nodes),
+        "min_direct_children": int(min_direct_children),
+        "input_component_count": len(task_components),
+        "output_component_count": len(new_components),
+        "split_component_count": int(applied_count),
+        "component_summaries": component_summaries,
+    }
+    if applied_count == 0:
+        return updated
+
+    rebuilt_edges: list[list[str]] = []
+    edge_seen: set[tuple[str, str]] = set()
+    for component in new_components:
+        for edge in component.get("edges", []):
+            if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+                continue
+            edge_key = (str(edge[0]), str(edge[1]))
+            if edge_key not in edge_seen:
+                edge_seen.add(edge_key)
+                rebuilt_edges.append([edge_key[0], edge_key[1]])
+    updated["edge_list"] = rebuilt_edges
+    updated["task_components"] = new_components
+    updated["task_component_diagnostics"] = _build_task_component_diagnostics_from_components(
+        new_components,
+        child_threshold=int(edge_list.get("child_threshold", 0) or 0),
+        split_mode=str(edge_list.get("split_mode", "fanout") or "fanout"),
+        count_segmented_children_upstream=bool(edge_list.get("count_segmented_children_upstream", False)),
+    )
+    return updated
+
+
+_SYSTEM_EXECUTABLE_PREFIXES = (
+    "/bin/",
+    "/sbin/",
+    "/usr/bin/",
+    "/usr/sbin/",
+    "/usr/lib/",
+    "/usr/local/libexec/",
+    "/lib/",
+    "/lib64/",
+)
+
+
+def _is_rare_non_system_execute_target(path: str) -> bool:
+    """Keep executable targets outside common operating-system binary locations."""
+    normalized = str(path or "").strip()
+    return bool(normalized) and normalized.lower() != "unknow" and not normalized.startswith(
+        _SYSTEM_EXECUTABLE_PREFIXES
+    )
+
+
+def _apply_selective_synthetic_root_isolation(
+    edge_list: Any,
+    *,
+    min_task_nodes: int,
+    min_direct_children: int,
+    max_exec_target_frequency: int,
+) -> Any:
+    """Extract rare executable branches while retaining the synthetic-root remainder.
+
+    The all-child split is intentionally avoided: CADETS collector roots contain
+    large numbers of unrelated normal service branches.  Only a direct subtree
+    that executes a rare target outside normal system binary locations becomes a
+    separate candidate task.
+    """
+    if not isinstance(edge_list, dict):
+        return edge_list
+    task_components = list(edge_list.get("task_components", []))
+    diagnostics = list(edge_list.get("task_component_diagnostics", []))
+    subject_starts = edge_list.get("subject_start_timestamps", {})
+    execute_targets = edge_list.get("canonical_execute_targets", {})
+    if not task_components or not isinstance(subject_starts, dict) or not isinstance(execute_targets, dict):
+        return edge_list
+    parent_missing_by_root = {
+        str(row.get("task_root", "")): bool(row.get("task_root_parent_missing", False))
+        for row in diagnostics
+        if isinstance(row, dict)
+    }
+    output_components: list[dict[str, Any]] = []
+    component_summaries: list[dict[str, Any]] = []
+    applied_count = 0
+    for component in task_components:
+        root = str(component.get("task_root", "")).strip()
+        children_map = _component_children_map(component)
+        direct_children = list(dict.fromkeys(children_map.get(root, [])))
+        summary: dict[str, Any] = {
+            "task_root": root,
+            "input_task_size": len(component.get("nodes", [])),
+            "direct_child_count": len(direct_children),
+            "applied": False,
+            "reason": "not_parent_missing",
+        }
+        try:
+            root_is_synthetic = int(subject_starts.get(root)) == 0
+        except (TypeError, ValueError):
+            root_is_synthetic = False
+        if (
+            not parent_missing_by_root.get(root, False)
+            or not root_is_synthetic
+            or len(component.get("nodes", [])) < int(min_task_nodes)
+            or len(direct_children) < int(min_direct_children)
+        ):
+            if not parent_missing_by_root.get(root, False):
+                summary["reason"] = "not_parent_missing"
+            elif not root_is_synthetic:
+                summary["reason"] = "root_start_not_zero"
+            elif len(component.get("nodes", [])) < int(min_task_nodes):
+                summary["reason"] = "below_min_task_nodes"
+            else:
+                summary["reason"] = "below_min_direct_children"
+            output_components.append(component)
+            component_summaries.append(summary)
+            continue
+
+        branch_nodes_by_child = {
+            child: _collect_component_subtree(child, children_map) for child in direct_children
+        }
+        target_frequency: dict[str, int] = {}
+        for branch_nodes in branch_nodes_by_child.values():
+            for node in branch_nodes:
+                for target, count in dict(execute_targets.get(str(node), {})).items():
+                    target = str(target)
+                    if _is_rare_non_system_execute_target(target):
+                        target_frequency[target] = target_frequency.get(target, 0) + int(count)
+        boundary_nodes = {str(node) for node in component.get("boundary_nodes", [])}
+        selected: list[tuple[str, set[str], list[str]]] = []
+        for child, branch_nodes in branch_nodes_by_child.items():
+            if child in boundary_nodes:
+                continue
+            targets = sorted(
+                {
+                    str(target)
+                    for node in branch_nodes
+                    for target in dict(execute_targets.get(str(node), {}))
+                    if _is_rare_non_system_execute_target(str(target))
+                    and target_frequency.get(str(target), 0) <= int(max_exec_target_frequency)
+                }
+            )
+            if targets:
+                selected.append((child, branch_nodes, targets))
+        if not selected:
+            summary["reason"] = "no_rare_non_system_execute_branch"
+            output_components.append(component)
+            component_summaries.append(summary)
+            continue
+
+        original_edges = [
+            [str(edge[0]), str(edge[1])]
+            for edge in component.get("edges", [])
+            if isinstance(edge, (list, tuple)) and len(edge) >= 2
+        ]
+        selected_nodes = set().union(*(nodes for _, nodes, _ in selected))
+        remaining_nodes = {str(node) for node in component.get("nodes", [])} - selected_nodes
+        remaining_nodes.add(root)
+        remaining_edges = [edge for edge in original_edges if edge[0] in remaining_nodes and edge[1] in remaining_nodes]
+        emitted: list[dict[str, Any]] = []
+        if len(remaining_nodes) >= 2 and remaining_edges:
+            remainder = dict(component)
+            remainder["nodes"] = sorted(remaining_nodes)
+            remainder["edges"] = remaining_edges
+            remainder["synthetic_root_selective_isolation_applied"] = True
+            remainder["synthetic_root_selective_isolation_role"] = "remainder"
+            emitted.append(remainder)
+        for child, branch_nodes, targets in selected:
+            branch_with_root = set(branch_nodes)
+            branch_with_root.add(root)
+            branch_edges = [edge for edge in original_edges if edge[0] in branch_with_root and edge[1] in branch_with_root]
+            if len(branch_with_root) >= 2 and branch_edges:
+                emitted.append(
+                    {
+                        "task_root": child,
+                        "nodes": sorted(branch_with_root),
+                        "edges": branch_edges,
+                        "boundary_nodes": sorted(boundary_nodes | {root}),
+                        "synthetic_root_selective_isolation_applied": True,
+                        "synthetic_root_selective_isolation_role": "rare_execute_branch",
+                        "synthetic_root_selective_isolation_parent_root": root,
+                        "synthetic_root_selective_isolation_targets": targets,
+                    }
+                )
+        if len(emitted) < 2:
+            summary["reason"] = "selective_components_not_viable"
+            output_components.append(component)
+        else:
+            summary.update(
+                {
+                    "applied": True,
+                    "reason": "rare_non_system_execute_branch_isolated",
+                    "selected_branch_count": len(emitted) - 1,
+                    "selected_targets": sorted({target for _, _, targets in selected for target in targets}),
+                }
+            )
+            output_components.extend(emitted)
+            applied_count += 1
+        component_summaries.append(summary)
+
+    updated = dict(edge_list)
+    updated["synthetic_root_selective_isolation_summary"] = {
+        "enabled": True,
+        "max_exec_target_frequency": int(max_exec_target_frequency),
+        "input_component_count": len(task_components),
+        "output_component_count": len(output_components),
+        "split_component_count": int(applied_count),
+        "component_summaries": component_summaries,
+    }
+    if applied_count == 0:
+        return updated
+    rebuilt_edges: list[list[str]] = []
+    seen_edges: set[tuple[str, str]] = set()
+    for component in output_components:
+        for edge in component.get("edges", []):
+            if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+                edge_key = (str(edge[0]), str(edge[1]))
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    rebuilt_edges.append([edge_key[0], edge_key[1]])
+    updated["edge_list"] = rebuilt_edges
+    updated["task_components"] = output_components
+    updated["task_component_diagnostics"] = _build_task_component_diagnostics_from_components(
+        output_components,
+        child_threshold=int(edge_list.get("child_threshold", 0) or 0),
+        split_mode=str(edge_list.get("split_mode", "fanout") or "fanout"),
+        count_segmented_children_upstream=bool(edge_list.get("count_segmented_children_upstream", False)),
+    )
+    return updated
+
+
+def _apply_branch_object_overlap_split(edge_list: Any) -> Any:
+    """Split root child subtrees unless they share at least one observed object.
+
+    An inverted object-to-branch index drives union-find connectivity, so each
+    branch object is visited once instead of comparing every pair of branches.
+    """
+    if not isinstance(edge_list, dict):
+        return edge_list
+    task_components = list(edge_list.get("task_components", []))
+    subject_object_ids = edge_list.get("canonical_subject_object_ids", {})
+    if not task_components or not isinstance(subject_object_ids, dict):
+        return edge_list
+
+    output_components: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    split_component_count = 0
+    for component in task_components:
+        root = str(component.get("task_root", "")).strip()
+        children_map = _component_children_map(component)
+        direct_children = list(dict.fromkeys(children_map.get(root, [])))
+        summary: dict[str, Any] = {
+            "task_root": root,
+            "input_task_size": len(component.get("nodes", [])),
+            "direct_child_count": len(direct_children),
+            "applied": False,
+        }
+        if len(direct_children) < 2:
+            summary["reason"] = "fewer_than_two_direct_branches"
+            output_components.append(component)
+            summaries.append(summary)
+            continue
+
+        branch_nodes = [_collect_component_subtree(child, children_map) for child in direct_children]
+        parent = list(range(len(direct_children)))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        object_owner: dict[str, int] = {}
+        branch_object_count = 0
+        for branch_index, nodes in enumerate(branch_nodes):
+            objects = {
+                str(object_id)
+                for node in nodes
+                for object_id in subject_object_ids.get(str(node), [])
+                if str(object_id)
+            }
+            branch_object_count += len(objects)
+            for object_id in objects:
+                previous_owner = object_owner.get(object_id)
+                if previous_owner is None:
+                    object_owner[object_id] = branch_index
+                else:
+                    union(branch_index, previous_owner)
+
+        groups: dict[int, list[int]] = {}
+        for branch_index in range(len(direct_children)):
+            groups.setdefault(find(branch_index), []).append(branch_index)
+        if len(groups) < 2:
+            summary.update(
+                {
+                    "reason": "all_direct_branches_connected_by_objects",
+                    "object_association_count": branch_object_count,
+                }
+            )
+            output_components.append(component)
+            summaries.append(summary)
+            continue
+
+        original_edges = [
+            [str(edge[0]), str(edge[1])]
+            for edge in component.get("edges", [])
+            if isinstance(edge, (list, tuple)) and len(edge) >= 2
+        ]
+        original_nodes = {str(node) for node in component.get("nodes", [])}
+        branch_node_union = set().union(*branch_nodes)
+        unassigned_nodes = original_nodes - branch_node_union - {root}
+        boundary_nodes = {str(node) for node in component.get("boundary_nodes", [])}
+        emitted: list[dict[str, Any]] = []
+        for group_index, branch_indexes in enumerate(groups.values()):
+            nodes = {root}
+            for branch_index in branch_indexes:
+                nodes.update(branch_nodes[branch_index])
+            # Preserve any atypical node that is not beneath a direct child.
+            if group_index == 0:
+                nodes.update(unassigned_nodes)
+            edges = [edge for edge in original_edges if edge[0] in nodes and edge[1] in nodes]
+            if len(nodes) < 2 or not edges:
+                continue
+            emitted.append(
+                {
+                    "task_root": root,
+                    "nodes": sorted(nodes),
+                    "edges": edges,
+                    "boundary_nodes": sorted(boundary_nodes | {root}),
+                    "branch_object_overlap_split_applied": True,
+                    "branch_object_overlap_parent_task_root": root,
+                    "branch_object_overlap_group_index": group_index,
+                    "branch_object_overlap_group_count": len(groups),
+                    "branch_object_overlap_child_roots": [direct_children[index] for index in branch_indexes],
+                }
+            )
+        if len(emitted) < 2:
+            summary["reason"] = "split_components_not_viable"
+            output_components.append(component)
+        else:
+            summary.update(
+                {
+                    "applied": True,
+                    "reason": "disconnected_direct_branches_split",
+                    "output_component_count": len(emitted),
+                    "object_association_count": branch_object_count,
+                    "distinct_object_count": len(object_owner),
+                }
+            )
+            output_components.extend(emitted)
+            split_component_count += 1
+        summaries.append(summary)
+
+    updated = dict(edge_list)
+    updated["branch_object_overlap_split_summary"] = {
+        "enabled": True,
+        "input_component_count": len(task_components),
+        "output_component_count": len(output_components),
+        "split_component_count": split_component_count,
+        "component_summaries": summaries,
+    }
+    if split_component_count == 0:
+        return updated
+    seen_edges: set[tuple[str, str]] = set()
+    rebuilt_edges: list[list[str]] = []
+    for component in output_components:
+        for edge in component.get("edges", []):
+            if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+                edge_key = (str(edge[0]), str(edge[1]))
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    rebuilt_edges.append([edge_key[0], edge_key[1]])
+    updated["edge_list"] = rebuilt_edges
+    updated["task_components"] = output_components
+    updated["task_component_diagnostics"] = _build_task_component_diagnostics_from_components(
+        output_components,
+        child_threshold=int(edge_list.get("child_threshold", 0) or 0),
+        split_mode=str(edge_list.get("split_mode", "fanout") or "fanout"),
+        count_segmented_children_upstream=bool(edge_list.get("count_segmented_children_upstream", False)),
+    )
+    return updated
+
+
 def _stage_optc_logs_exact(cfg: FusionConfig, workspace: Path, vendor_module: ModuleType, require_all_hosts: bool) -> None:
     optc_root = workspace / "data" / "optc"
     logs_root = optc_root / "logs"
@@ -1275,8 +2513,14 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
     with _temporary_cwd(workspace):
         source_logs = _normalize_tc3_source_logs(cfg.source_logs)
         parser_metadata: dict[str, Any] = {}
+        # THEIA filters() returns embeddings directly and has no parser-level
+        # event-count sidecar.  Keep the generic stats fallback available.
+        event_count: dict[object, object] | None = None
         if cfg.host == "cadets":
-            subject_list, object_list, event_count, parser_metadata = vendor.parser_cadets(source_logs)
+            subject_list, object_list, event_count, parser_metadata = vendor.parser_cadets(
+                source_logs,
+                collect_subject_object_ids=bool(cfg.task_component_branch_object_overlap_split_enabled),
+            )
             subject_node = vendor.encode_cadets(subject_list, object_list, event_count)
             if use_release_legacy_cut:
                 edge_list = vendor.cut_task(subject_list, use_release_legacy=True)
@@ -1289,12 +2533,16 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
             edge_list = vendor.cut_task(subject_list, return_task_components=True, **task_component_kwargs)
             raw_vectors = vendor.get_node_vec(subject_node)
         elif cfg.host == "trace":
-            subject_list, object_list, event_count, parser_metadata = vendor.parser_trace(source_logs)
+            subject_list, object_list, event_count, parser_metadata = vendor.parser_trace(
+                source_logs,
+                collect_subject_object_ids=bool(cfg.task_component_branch_object_overlap_split_enabled),
+            )
             subject_node = vendor.encode_trace(subject_list, object_list, event_count)
             edge_list = vendor.cut_task(subject_list, return_task_components=True, **task_component_kwargs)
             raw_vectors = vendor.get_node_vec(subject_node)
         elif cfg.host == "theia":
             edge_list, raw_vectors = vendor.filters(source_logs, return_task_components=True, **task_component_kwargs)
+            parser_metadata = copy.deepcopy(edge_list.get("parser_metadata", {}))
             if bool(cfg.task_component_theia_temporal_split_enabled):
                 edge_list = _apply_theia_temporal_split(
                     edge_list,
@@ -1322,7 +2570,109 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
             ground_truth = direct_subject_ground_truth
         else:
             edge_list, raw_vectors = vendor.filters(source_logs, **task_component_kwargs)
+    if bool(cfg.task_component_provgrp_behavior_partition_enabled):
+        if cfg.host not in {"cadets", "trace", "theia"}:
+            raise ValueError("ProvGRP paper partition currently supports tc3/cadets, trace, and theia")
+        if not isinstance(edge_list, dict) or "task_components" not in edge_list:
+            raise ValueError(
+                "ProvGRP paper partition requires TAPAS task components; "
+                "disable task_tapas_release_legacy_cut_logic."
+            )
+        edge_list = apply_provgrp_paper_partition_to_edge_list(
+            edge_list,
+            source_logs=source_logs,
+            raw_subject_to_canonical_node=parser_metadata.get("raw_subject_to_canonical_node", {}),
+            min_direct_children=int(cfg.task_component_provgrp_min_direct_children),
+            min_cluster_size=int(cfg.task_component_provgrp_min_cluster_size),
+            min_samples=int(cfg.task_component_provgrp_min_samples),
+            max_events_per_matrix=int(cfg.task_component_provgrp_max_events_per_matrix),
+            batch_overlap_events=int(cfg.task_component_provgrp_batch_overlap_events),
+        )
+    subject_time_ranges = parser_metadata.pop("canonical_subject_time_ranges", {})
+    if (
+        cfg.host in {"cadets", "trace"}
+        and bool(cfg.task_component_root_temporal_split_enabled)
+        and isinstance(edge_list, dict)
+    ):
+        edge_list = dict(edge_list)
+        edge_list["subject_time_ranges"] = subject_time_ranges
+        edge_list = _apply_root_temporal_split(
+            edge_list,
+            min_task_nodes=int(cfg.task_component_root_temporal_min_task_nodes),
+            min_direct_children=int(cfg.task_component_root_temporal_min_direct_children),
+            max_span_minutes=int(cfg.task_component_root_temporal_max_span_minutes),
+            branch_gap_minutes=int(cfg.task_component_root_temporal_branch_gap_minutes),
+            session_max_minutes=int(cfg.task_component_root_temporal_session_max_minutes),
+            max_sessions=int(cfg.task_component_root_temporal_max_sessions),
+        )
+    if (
+        cfg.host in {"cadets", "trace"}
+        and bool(cfg.task_component_temporal_episode_split_enabled)
+        and isinstance(edge_list, dict)
+    ):
+        edge_list = dict(edge_list)
+        edge_list["subject_time_ranges"] = subject_time_ranges
+        edge_list = _apply_temporal_episode_split(
+            edge_list,
+            parent_missing_only=bool(cfg.task_component_temporal_episode_parent_missing_only),
+            min_task_nodes=int(cfg.task_component_temporal_episode_min_task_nodes),
+            min_direct_children=int(cfg.task_component_temporal_episode_min_direct_children),
+            min_span_minutes=int(cfg.task_component_temporal_episode_min_span_minutes),
+            gap_mode=str(cfg.task_component_temporal_episode_gap_mode),
+            fixed_gap_minutes=int(cfg.task_component_temporal_episode_fixed_gap_minutes),
+            gap_quantile=float(cfg.task_component_temporal_episode_gap_quantile),
+            mad_multiplier=float(cfg.task_component_temporal_episode_mad_multiplier),
+            min_children_per_episode=int(cfg.task_component_temporal_episode_min_children_per_episode),
+            max_episodes=int(cfg.task_component_temporal_episode_max_episodes),
+            budget_strategy=str(cfg.task_component_temporal_episode_budget_strategy),
+        )
+    if (
+        cfg.host == "cadets"
+        and bool(cfg.task_component_synthetic_root_isolation_enabled)
+        and isinstance(edge_list, dict)
+    ):
+        edge_list = dict(edge_list)
+        edge_list["subject_start_timestamps"] = parser_metadata.get(
+            "canonical_subject_start_timestamps", {}
+        )
+        edge_list = _apply_synthetic_root_isolation(
+            edge_list,
+            min_task_nodes=int(cfg.task_component_synthetic_root_isolation_min_task_nodes),
+            min_direct_children=int(cfg.task_component_synthetic_root_isolation_min_direct_children),
+        )
+    if (
+        cfg.host == "cadets"
+        and bool(cfg.task_component_synthetic_root_selective_isolation_enabled)
+        and isinstance(edge_list, dict)
+    ):
+        edge_list = dict(edge_list)
+        edge_list["subject_start_timestamps"] = parser_metadata.get(
+            "canonical_subject_start_timestamps", {}
+        )
+        edge_list["canonical_execute_targets"] = parser_metadata.get("canonical_execute_targets", {})
+        edge_list = _apply_selective_synthetic_root_isolation(
+            edge_list,
+            min_task_nodes=int(cfg.task_component_synthetic_root_isolation_min_task_nodes),
+            min_direct_children=int(cfg.task_component_synthetic_root_isolation_min_direct_children),
+            max_exec_target_frequency=int(
+                cfg.task_component_synthetic_root_selective_max_exec_target_frequency
+            ),
+        )
+    if (
+        cfg.host in {"cadets", "trace"}
+        and bool(cfg.task_component_branch_object_overlap_split_enabled)
+        and isinstance(edge_list, dict)
+    ):
+        edge_list = dict(edge_list)
+        # Parser UUIDs keep this pass independent of later object-key normalization.
+        edge_list["canonical_subject_object_ids"] = parser_metadata.pop(
+            "canonical_subject_object_ids", {}
+        )
+        edge_list = _apply_branch_object_overlap_split(edge_list)
+    else:
+        parser_metadata.pop("canonical_subject_object_ids", None)
     canonical_ground_truth = _canonicalize_ground_truth_nodes(ground_truth, parser_metadata)
+    parser_full_event_action_counts = parser_metadata.pop("canonical_event_action_counts", {})
     if cfg.host == "theia_e5":
         object_linked_ground_truth = {
             str(node).strip()
@@ -1337,6 +2687,40 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
         parser_metadata["object_linked_ground_truth_canonical_count"] = len(object_linked_ground_truth)
         canonical_ground_truth |= object_linked_ground_truth
         parser_metadata["combined_ground_truth_canonical_count"] = len(canonical_ground_truth)
+    graph_metas = _decompose_tc3_metadata(edge_list, canonical_ground_truth)
+    semantic_sequence_scores_path: Path | None = None
+    if cfg.task_sequence_encoder_mode == "semantic_v1":
+        semantic_histories = parser_metadata.pop("canonical_semantic_event_histories", {})
+        if not isinstance(semantic_histories, dict) or not semantic_histories:
+            raise ValueError(
+                f"{cfg.host} parser did not provide canonical semantic histories required by task_sequence_encoder_mode=semantic_v1"
+            )
+        train_subject_ids = _semantic_sequence_train_subject_ids(cfg, graph_metas)
+        semantic_model_path = (
+            cfg.task_semantic_sequence_pretrained_path
+            if cfg.task_semantic_sequence_pretrained_path is not None and cfg.task_semantic_sequence_pretrained_path.exists()
+            else module1_dir / "semantic_sequence_encoder.pt"
+        )
+        semantic_result = fit_benign_semantic_sequence_encoder(
+            semantic_histories,
+            train_subject_ids,
+            semantic_model_path,
+            epochs=int(cfg.task_semantic_sequence_epochs),
+            batch_size=int(cfg.task_semantic_sequence_batch_size),
+            learning_rate=float(cfg.task_semantic_sequence_learning_rate),
+            seed=int(cfg.random_seed),
+            pretrained_path=cfg.task_semantic_sequence_pretrained_path,
+        )
+        raw_vectors = semantic_result.vectors
+        semantic_sequence_scores_path = module1_dir / "semantic_sequence_prediction_errors.json"
+        save_json(semantic_sequence_scores_path, semantic_result.prediction_errors)
+        parser_metadata["semantic_sequence_encoder"] = semantic_result.metadata
+        parser_metadata["semantic_sequence_prediction_errors_path"] = str(semantic_sequence_scores_path)
+        parser_metadata["semantic_sequence_train_subject_count"] = len(train_subject_ids)
+    else:
+        # Avoid storing a large unused history sidecar in legacy module1 bundles.
+        parser_metadata.pop("canonical_semantic_event_histories", None)
+
     raw_graphs = vendor.decompose(
         edge_list,
         raw_vectors,
@@ -1345,7 +2729,6 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
     )
 
     embeddings_map = _vector_rows_to_map(raw_vectors)
-    graph_metas = _decompose_tc3_metadata(edge_list, canonical_ground_truth)
     _validate_graph_meta_alignment(raw_graphs, graph_metas, f"tc3/{cfg.host}")
     base_edge_rows = edge_list.get("edge_list", edge_list) if isinstance(edge_list, dict) else edge_list
     selected_edge_list = [list(edge) for edge in base_edge_rows]
@@ -1360,7 +2743,31 @@ def _build_tc3_bundle(cfg: FusionConfig, module1_dir: Path) -> dict[str, Any]:
         "sequence_feature_dim": _feature_dim_from_map(embeddings_map),
         "thread_merge_metadata": copy.deepcopy(parser_metadata),
         "parser_event_count": event_count if cfg.use_ocr_stat_features else None,
+        "parser_full_event_action_counts": parser_full_event_action_counts if cfg.use_ocr_stat_features else None,
+        "semantic_sequence_prediction_errors_path": str(semantic_sequence_scores_path) if semantic_sequence_scores_path else "",
         "theia_temporal_split_summary": copy.deepcopy(edge_list.get("theia_temporal_split_summary", {}))
+        if isinstance(edge_list, dict)
+        else {},
+        "root_temporal_split_summary": copy.deepcopy(edge_list.get("root_temporal_split_summary", {}))
+        if isinstance(edge_list, dict)
+        else {},
+        "temporal_episode_split_summary": copy.deepcopy(edge_list.get("temporal_episode_split_summary", {}))
+        if isinstance(edge_list, dict)
+        else {},
+        "provgrp_paper_partition_summary": copy.deepcopy(edge_list.get("provgrp_paper_partition_summary", {}))
+        if isinstance(edge_list, dict)
+        else {},
+        "synthetic_root_isolation_summary": copy.deepcopy(edge_list.get("synthetic_root_isolation_summary", {}))
+        if isinstance(edge_list, dict)
+        else {},
+        "synthetic_root_selective_isolation_summary": copy.deepcopy(
+            edge_list.get("synthetic_root_selective_isolation_summary", {})
+        )
+        if isinstance(edge_list, dict)
+        else {},
+        "branch_object_overlap_split_summary": copy.deepcopy(
+            edge_list.get("branch_object_overlap_split_summary", {})
+        )
         if isinstance(edge_list, dict)
         else {},
     }
@@ -1450,13 +2857,25 @@ def _extract_stat_embeddings_for_graphs(
     cfg: FusionConfig,
     graph_metas: list[dict[str, Any]],
     parser_event_count: dict[object, object] | None = None,
+    parser_full_event_action_counts: dict[object, object] | None = None,
     parser_metadata: dict[str, object] | None = None,
 ) -> tuple[dict[str, list[float]], list[str]]:
     process_ids = {str(node) for meta in graph_metas for node in meta.get("node_ids", [])}
     if not process_ids:
         return {}, []
 
-    if cfg.dataset_family == "tc3" and parser_event_count is not None:
+    if (
+        cfg.dataset_family == "tc3"
+        and cfg.task_tc3_event_stats_mode in {"core", "extended", "security_semantic"}
+        and parser_full_event_action_counts is not None
+    ):
+        stats_df = extract_process_stat_features_from_tc3_action_counts(
+            cfg,
+            process_ids,
+            parser_full_event_action_counts,
+            cfg.task_tc3_event_stats_mode,
+        )
+    elif cfg.dataset_family == "tc3" and parser_event_count is not None:
         stats_df = extract_process_stat_features_from_tc3_event_count(
             cfg,
             process_ids,
@@ -1547,7 +2966,9 @@ def _append_stats_to_bundle(cfg: FusionConfig, bundle: dict[str, Any]) -> dict[s
     updated["base_sequence_feature_dim"] = int(bundle["sequence_feature_dim"]) if cfg.use_sequence_embeddings else 0
     updated["stat_feature_columns"] = []
     updated["selected_stat_embeddings"] = {}
+    updated["stat_feature_source"] = "disabled"
     parser_event_count = updated.pop("parser_event_count", None)
+    parser_full_event_action_counts = updated.pop("parser_full_event_action_counts", None)
     parser_metadata_for_stats = updated.get("thread_merge_metadata", {})
     if not cfg.use_sequence_embeddings:
         if updated["family"] == "tc3":
@@ -1563,6 +2984,9 @@ def _append_stats_to_bundle(cfg: FusionConfig, bundle: dict[str, Any]) -> dict[s
             cfg,
             updated["selected_graph_metas"],
             parser_event_count=parser_event_count if isinstance(parser_event_count, dict) else None,
+            parser_full_event_action_counts=(
+                parser_full_event_action_counts if isinstance(parser_full_event_action_counts, dict) else None
+            ),
             parser_metadata=parser_metadata_for_stats if isinstance(parser_metadata_for_stats, dict) else None,
         )
         embeddings, graphs, base_dim = _apply_graphsage_feature_policy(
@@ -1578,6 +3002,12 @@ def _append_stats_to_bundle(cfg: FusionConfig, bundle: dict[str, Any]) -> dict[s
         updated["selected_graphs"] = graphs
         updated["base_sequence_feature_dim"] = base_dim
         updated["stat_feature_columns"] = stat_columns
+        updated["stat_feature_source"] = (
+            f"parser_full_action_counts_{cfg.task_tc3_event_stats_mode}"
+            if cfg.task_tc3_event_stats_mode in {"core", "extended", "security_semantic"}
+            and isinstance(parser_full_event_action_counts, dict)
+            else "legacy_parser_event_aggregate"
+        )
         return updated
 
     updated_embeddings_by_host: dict[str, dict[str, list[float]]] = {}
@@ -1693,6 +3123,26 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
             "temporal_component_last_timestamp_sec",
             "temporal_component_span_minutes",
             "temporal_component_root_retained",
+            "temporal_episode_split_applied",
+            "temporal_episode_parent_task_root",
+            "temporal_episode_index",
+            "temporal_episode_count",
+            "temporal_episode_child_roots",
+            "temporal_episode_first_child_timestamp_sec",
+            "temporal_episode_last_child_timestamp_sec",
+            "temporal_episode_child_span_minutes",
+            "temporal_episode_root_retained",
+            "provgrp_paper_partition_applied",
+            "provgrp_paper_parent_task_root",
+            "provgrp_paper_partition_index",
+            "provgrp_paper_partition_count",
+            "provgrp_paper_incoming_cluster_id",
+            "provgrp_paper_outgoing_cluster_id",
+            "provgrp_paper_incoming_event_count",
+            "provgrp_paper_outgoing_event_count",
+            "provgrp_paper_member_child_roots",
+            "provgrp_paper_member_child_count",
+            "provgrp_paper_original_root_child_count",
         ]:
             if key in meta:
                 row[key] = copy.deepcopy(meta[key])
@@ -1715,6 +3165,8 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
         "use_sequence_embeddings": bool(cfg.use_sequence_embeddings),
         "use_ocr_stat_features": bool(cfg.use_ocr_stat_features),
         "graphsage_append_ocr_stat_features": bool(cfg.graphsage_append_ocr_stat_features),
+        "task_tc3_event_stats_mode": str(cfg.task_tc3_event_stats_mode),
+        "stat_feature_source": str(bundle.get("stat_feature_source", "disabled")),
         "graphsage_node_feature_sources": _graphsage_node_feature_sources(cfg),
         "graph_stat_sidecar_sources": {
             "ocr_stat_features": bool(cfg.use_ocr_stat_features),
@@ -1745,6 +3197,69 @@ def _save_module1_exports(cfg: FusionConfig, out_dir: Path, bundle: dict[str, An
         summary["task_component_theia_max_span_minutes"] = int(cfg.task_component_theia_max_span_minutes)
         summary["task_component_theia_branch_gap_minutes"] = int(cfg.task_component_theia_branch_gap_minutes)
         summary["theia_temporal_split_summary"] = copy.deepcopy(bundle.get("theia_temporal_split_summary", {}))
+    if cfg.host in {"cadets", "trace"}:
+        summary["task_component_provgrp_behavior_partition_enabled"] = bool(
+            cfg.task_component_provgrp_behavior_partition_enabled
+        )
+        summary["provgrp_paper_partition_summary"] = copy.deepcopy(
+            bundle.get("provgrp_paper_partition_summary", {})
+        )
+        summary["task_component_root_temporal_split_enabled"] = bool(
+            cfg.task_component_root_temporal_split_enabled
+        )
+        summary["task_component_root_temporal_min_task_nodes"] = int(
+            cfg.task_component_root_temporal_min_task_nodes
+        )
+        summary["task_component_root_temporal_min_direct_children"] = int(
+            cfg.task_component_root_temporal_min_direct_children
+        )
+        summary["task_component_root_temporal_max_span_minutes"] = int(
+            cfg.task_component_root_temporal_max_span_minutes
+        )
+        summary["task_component_root_temporal_branch_gap_minutes"] = int(
+            cfg.task_component_root_temporal_branch_gap_minutes
+        )
+        summary["task_component_root_temporal_session_max_minutes"] = int(
+            cfg.task_component_root_temporal_session_max_minutes
+        )
+        summary["task_component_root_temporal_max_sessions"] = int(
+            cfg.task_component_root_temporal_max_sessions
+        )
+        summary["root_temporal_split_summary"] = copy.deepcopy(bundle.get("root_temporal_split_summary", {}))
+        summary["task_component_temporal_episode_split_enabled"] = bool(
+            cfg.task_component_temporal_episode_split_enabled
+        )
+        summary["temporal_episode_split_summary"] = copy.deepcopy(
+            bundle.get("temporal_episode_split_summary", {})
+        )
+        summary["task_component_branch_object_overlap_split_enabled"] = bool(
+            cfg.task_component_branch_object_overlap_split_enabled
+        )
+        summary["branch_object_overlap_split_summary"] = copy.deepcopy(
+            bundle.get("branch_object_overlap_split_summary", {})
+        )
+    if cfg.host == "cadets":
+        summary["task_component_synthetic_root_isolation_enabled"] = bool(
+            cfg.task_component_synthetic_root_isolation_enabled
+        )
+        summary["task_component_synthetic_root_isolation_min_task_nodes"] = int(
+            cfg.task_component_synthetic_root_isolation_min_task_nodes
+        )
+        summary["task_component_synthetic_root_isolation_min_direct_children"] = int(
+            cfg.task_component_synthetic_root_isolation_min_direct_children
+        )
+        summary["synthetic_root_isolation_summary"] = copy.deepcopy(
+            bundle.get("synthetic_root_isolation_summary", {})
+        )
+        summary["task_component_synthetic_root_selective_isolation_enabled"] = bool(
+            cfg.task_component_synthetic_root_selective_isolation_enabled
+        )
+        summary["task_component_synthetic_root_selective_max_exec_target_frequency"] = int(
+            cfg.task_component_synthetic_root_selective_max_exec_target_frequency
+        )
+        summary["synthetic_root_selective_isolation_summary"] = copy.deepcopy(
+            bundle.get("synthetic_root_selective_isolation_summary", {})
+        )
     save_json(summary_path, summary)
 
     return {
@@ -1952,12 +3467,22 @@ def _normal_only_fit_kmeans(matrix: np.ndarray, requested_clusters: int, seed: i
     ).fit(matrix)
 
 
+def _normal_only_local_keep_count(cfg: FusionConfig, node_count: int) -> int:
+    mode = str(getattr(cfg, "task_normal_only_local_top_k_mode", "fixed"))
+    if mode == "sqrt":
+        requested = int(np.ceil(np.sqrt(max(1, node_count))))
+        requested = min(requested, int(getattr(cfg, "task_normal_only_local_top_k_max", 16)))
+    else:
+        requested = int(cfg.task_normal_only_local_top_k)
+    return min(max(1, requested), max(1, node_count))
+
+
 def _normal_only_node_local_scores(
+    cfg: FusionConfig,
     graphs: Sequence[dict[str, Any]],
     indices: Sequence[int],
     node_scaler: StandardScaler,
     node_model: MiniBatchKMeans,
-    top_k: int,
 ) -> np.ndarray:
     scores: list[float] = []
     for index in indices:
@@ -1966,17 +3491,33 @@ def _normal_only_node_local_scores(
             scores.append(0.0)
             continue
         distances = node_model.transform(node_scaler.transform(nodes)).min(axis=1)
-        keep = min(max(1, int(top_k)), len(distances))
+        keep = _normal_only_local_keep_count(cfg, len(distances))
         scores.append(float(np.partition(distances, len(distances) - keep)[-keep:].mean()))
     return np.asarray(scores, dtype=np.float64)
+
+
+def _normal_only_fit_global_model(
+    matrix: np.ndarray,
+    cfg: FusionConfig,
+) -> tuple[MiniBatchKMeans | NearestNeighbors, str]:
+    mode = str(getattr(cfg, "task_normal_only_global_model", "kmeans"))
+    if mode == "knn":
+        neighbors = min(max(1, int(getattr(cfg, "task_normal_only_global_knn_neighbors", 5))), len(matrix))
+        return NearestNeighbors(n_neighbors=neighbors, metric="euclidean").fit(matrix), mode
+    return _normal_only_fit_kmeans(matrix, int(cfg.task_normal_only_task_prototypes), int(cfg.random_seed)), "kmeans"
 
 
 def _normal_only_global_scores(
     graph_matrix: np.ndarray,
     graph_scaler: StandardScaler,
-    graph_model: MiniBatchKMeans,
+    graph_model: MiniBatchKMeans | NearestNeighbors,
+    graph_model_mode: str,
 ) -> np.ndarray:
-    return graph_model.transform(graph_scaler.transform(graph_matrix)).min(axis=1).astype(np.float64)
+    transformed = graph_scaler.transform(graph_matrix)
+    if graph_model_mode == "knn":
+        distances, _ = graph_model.kneighbors(transformed)
+        return distances.mean(axis=1).astype(np.float64)
+    return graph_model.transform(transformed).min(axis=1).astype(np.float64)
 
 
 def _normal_only_robust_scale(reference: np.ndarray) -> tuple[float, float]:
@@ -2007,6 +3548,9 @@ def _run_normal_only_tc3(
     graphs = copy.deepcopy(bundle["selected_graphs"])
     metas = copy.deepcopy(bundle["selected_graph_metas"])
     split = _normal_only_temporal_split(cfg, graphs, metas)
+    if getattr(cfg, "task_normal_only_detector", "prototype") == "gin_autoencoder":
+        result = run_normal_only_gin_autoencoder(cfg, graphs, metas, split, model_path)
+        return result.rows, _rows_metrics(result.rows), result.info
     train_indices = list(split["train_indices"])
     validation_indices = list(split["validation_indices"])
     evaluation_indices = list(split["evaluation_indices"])
@@ -2025,17 +3569,16 @@ def _run_normal_only_tc3(
 
     train_graph_matrix = _normal_only_graph_matrix(graphs, metas, train_indices)
     graph_scaler = StandardScaler().fit(train_graph_matrix)
-    graph_model = _normal_only_fit_kmeans(
+    graph_model, graph_model_mode = _normal_only_fit_global_model(
         graph_scaler.transform(train_graph_matrix),
-        int(cfg.task_normal_only_task_prototypes),
-        int(cfg.random_seed),
+        cfg,
     )
 
     validation_local = _normal_only_node_local_scores(
-        graphs, validation_indices, node_scaler, node_model, int(cfg.task_normal_only_local_top_k)
+        cfg, graphs, validation_indices, node_scaler, node_model
     )
     validation_global = _normal_only_global_scores(
-        _normal_only_graph_matrix(graphs, metas, validation_indices), graph_scaler, graph_model
+        _normal_only_graph_matrix(graphs, metas, validation_indices), graph_scaler, graph_model, graph_model_mode
     )
     local_center, local_scale = _normal_only_robust_scale(validation_local)
     global_center, global_scale = _normal_only_robust_scale(validation_global)
@@ -2051,10 +3594,10 @@ def _run_normal_only_tc3(
     threshold = float(np.quantile(validation_scores, 1.0 - float(cfg.task_normal_only_validation_fpr)))
 
     evaluation_local = _normal_only_node_local_scores(
-        graphs, evaluation_indices, node_scaler, node_model, int(cfg.task_normal_only_local_top_k)
+        cfg, graphs, evaluation_indices, node_scaler, node_model
     )
     evaluation_global = _normal_only_global_scores(
-        _normal_only_graph_matrix(graphs, metas, evaluation_indices), graph_scaler, graph_model
+        _normal_only_graph_matrix(graphs, metas, evaluation_indices), graph_scaler, graph_model, graph_model_mode
     )
     evaluation_scores = _normal_only_combine_scores(
         evaluation_local,
@@ -2114,8 +3657,12 @@ def _run_normal_only_tc3(
         "threshold": threshold,
         "config": {
             "task_prototypes": int(node_model.n_clusters),
-            "graph_prototypes": int(graph_model.n_clusters),
+            "graph_prototypes": int(graph_model.n_clusters) if graph_model_mode == "kmeans" else 0,
+            "global_model": graph_model_mode,
+            "global_knn_neighbors": int(getattr(graph_model, "n_neighbors", 0)),
             "local_top_k": int(cfg.task_normal_only_local_top_k),
+            "local_top_k_mode": str(getattr(cfg, "task_normal_only_local_top_k_mode", "fixed")),
+            "local_top_k_max": int(getattr(cfg, "task_normal_only_local_top_k_max", 16)),
             "global_weight": float(cfg.task_normal_only_global_weight),
             "validation_fpr": float(cfg.task_normal_only_validation_fpr),
         },
@@ -2127,7 +3674,11 @@ def _run_normal_only_tc3(
         **copy.deepcopy(split["summary"]),
         "node_training_sample_count": int(len(train_nodes)),
         "node_prototype_count": int(node_model.n_clusters),
-        "task_prototype_count": int(graph_model.n_clusters),
+        "task_prototype_count": int(graph_model.n_clusters) if graph_model_mode == "kmeans" else 0,
+        "global_model": graph_model_mode,
+        "global_knn_neighbors": int(getattr(graph_model, "n_neighbors", 0)),
+        "local_top_k_mode": str(getattr(cfg, "task_normal_only_local_top_k_mode", "fixed")),
+        "local_top_k_max": int(getattr(cfg, "task_normal_only_local_top_k_max", 16)),
         "threshold": threshold,
         "threshold_source": "benign_validation_quantile",
         "validation_fpr_target": float(cfg.task_normal_only_validation_fpr),
@@ -2747,6 +4298,8 @@ def _summary_common(cfg: FusionConfig, bundle: dict[str, Any], model_path: Path)
             "ocr_stat_features": bool(cfg.use_ocr_stat_features),
         },
         "graphsage_append_ocr_stat_features": bool(cfg.graphsage_append_ocr_stat_features),
+        "task_tc3_event_stats_mode": str(cfg.task_tc3_event_stats_mode),
+        "stat_feature_source": str(bundle.get("stat_feature_source", "disabled")),
         "decision_threshold": 0.5,
         "decision_threshold_mode": "argmax",
         "decision_threshold_selection": {

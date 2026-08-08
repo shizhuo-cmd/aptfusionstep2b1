@@ -31,7 +31,7 @@ task_normal_only_node_prototypes: 32
 task_normal_only_node_sample_limit: 100000
 task_normal_only_local_top_k: 3
 task_normal_only_global_weight: 0.40
-task_normal_only_validation_fpr: 0.01
+task_normal_only_validation_fpr: 0.02
 
 task_tapas_augmentation_enabled: false
 task_component_split_mode: "fanout"

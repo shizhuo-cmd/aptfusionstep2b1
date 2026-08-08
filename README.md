@@ -3,7 +3,7 @@
 APT-Fusion currently keeps one supported mainline:
 
 ```text
-module0 -> module1 -> module2 -> module3_evidence -> module4_compact -> module5_paths -> module6_reason
+module1 -> module2 -> module3_evidence -> module4_compact -> module5_paths -> module6_reason
 ```
 
 The front half builds TAPAS-native task graphs and task-level anomaly scores.  
@@ -24,7 +24,7 @@ src/apt_fusion/
 
 - `task_detection/`
   - TAPAS-native task construction and detection
-  - includes `module0_preprocess.py`, `module1_online_graph.py`, `module2_online_detection.py`, `tapas_native_backend.py`
+  - includes `module1_online_graph.py`, `module2_online_detection.py`, `tapas_native_backend.py`
 - `path_reason/`
   - evidence recovery, semantic compaction, candidate path search, ATT&CK reasoning
 - `evaluation/`
@@ -36,7 +36,6 @@ Old `full / full_local / full_reason` routes and their code were removed from th
 
 The CLI now supports only these stages:
 
-- `module0`
 - `module1`
 - `module2`
 - `module3_evidence`

@@ -60,9 +60,6 @@ llm_deepseek_api_key: ""
 llm_ollama_base_url: "http://127.0.0.1:11434"
 llm_request_timeout_sec: 1800
 
-graphdb_repository_url: ""
-graphdb_username: ""
-graphdb_password: ""
 
 local_context_hops: 1
 module3_task_selection_mode: "predicted_positive"   # predicted_positive | ground_truth_positive | ground_truth_positive_base_only

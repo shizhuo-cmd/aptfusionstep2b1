@@ -5,8 +5,7 @@
 This repository keeps one supported pipeline:
 
 ```text
-module0
--> module1
+module1
 -> module2
 -> module3_evidence
 -> module4_compact
@@ -70,7 +69,6 @@ Read:
 ## Current CLI Surface
 
 Supported stages:
-- `module0`
 - `module1`
 - `module2`
 - `module3_evidence`
@@ -85,7 +83,7 @@ Main entry files:
 - `src/apt_fusion/config.py`
 
 Important stage semantics in `pipeline.py`:
-- `module2` reruns `module0 -> module1 -> module2`
+- `module2` reruns `module1 -> module2`
 - `module5_paths` reruns `module3_evidence -> module4_compact -> module5_paths`
 - `module6_reason` reruns `module3_evidence -> module4_compact -> module5_paths -> module6_reason`
 

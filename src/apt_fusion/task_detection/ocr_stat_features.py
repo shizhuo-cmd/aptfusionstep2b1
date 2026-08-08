@@ -384,6 +384,168 @@ _TC3_EVENT_ID_TO_ACTION = {
     11: "create_object",
 }
 
+_TC3_CORE_ACTIONS = {
+    "accept",
+    "connect",
+    "execute",
+    "exit",
+    "read",
+    "recvfrom",
+    "recvmsg",
+    "sendto",
+    "sendmsg",
+    "write",
+}
+
+_TC3_SECURITY_ACTION_FAMILIES = {
+    "execute": "sem_execution",
+    "exit": "sem_process_lifecycle",
+    "fork": "sem_process_lifecycle",
+    "modify_process": "sem_process_lifecycle",
+    "change_principal": "sem_privilege",
+    "read": "sem_file_read",
+    "write": "sem_file_write",
+    "open": "sem_file_open",
+    "close": "sem_file_open",
+    "unlink": "sem_file_mutation",
+    "rename": "sem_file_mutation",
+    "link": "sem_file_mutation",
+    "modify_file_attributes": "sem_file_mutation",
+    "truncate": "sem_file_mutation",
+    "create_object": "sem_file_mutation",
+    "connect": "sem_network_connect",
+    "accept": "sem_network_connect",
+    "bind": "sem_network_connect",
+    "sendto": "sem_network_send",
+    "sendmsg": "sem_network_send",
+    "recvfrom": "sem_network_receive",
+    "recvmsg": "sem_network_receive",
+    "mmap": "sem_memory_control",
+    "fcntl": "sem_memory_control",
+    "signal": "sem_process_signal",
+}
+_TC3_SECURITY_SEMANTIC_COLUMNS = [
+    "sem_execution",
+    "sem_process_lifecycle",
+    "sem_privilege",
+    "sem_file_read",
+    "sem_file_write",
+    "sem_file_open",
+    "sem_file_mutation",
+    "sem_network_connect",
+    "sem_network_send",
+    "sem_network_receive",
+    "sem_memory_control",
+    "sem_process_signal",
+    "sem_log_total_events",
+    "sem_log_security_events",
+    "sem_security_event_ratio",
+]
+
+
+def extract_process_stat_features_from_tc3_action_counts(
+    cfg: FusionConfig,
+    process_ids: Iterable[str],
+    action_counts_by_subject: dict[object, object],
+    mode: str,
+) -> pd.DataFrame:
+    """Build canonical TC3 process statistics from one-pass parser action tallies.
+
+    The legacy TAPAS sequence parser only retains ten event types.  This helper
+    receives a separate per-canonical-subject tally collected from the same
+    stream, so ``core`` and ``extended`` modes can differ only by their event
+    coverage while using the same fixed output feature schema.
+    """
+    if mode not in {"core", "extended", "security_semantic"}:
+        raise ValueError("TC3 action-count statistics require a supported action-count mode")
+
+    if mode == "security_semantic":
+        return extract_process_semantic_features_from_tc3_action_counts(
+            process_ids,
+            action_counts_by_subject,
+        )
+
+    process_id_set = {str(process_id).strip() for process_id in process_ids if str(process_id).strip()}
+    action_columns = _ordered_action_columns(cfg.host)
+    allowed_actions = {column[len("stat_out_") :] for column in action_columns if column.startswith("stat_out_")}
+    process_rows: dict[str, dict[str, object]] = {}
+
+    for raw_subject_id, raw_counts in action_counts_by_subject.items():
+        subject_id = str(raw_subject_id).strip()
+        if subject_id not in process_id_set or not isinstance(raw_counts, dict):
+            continue
+        for raw_action, raw_count in raw_counts.items():
+            action_text = str(raw_action or "").strip().lower()
+            if action_text.startswith("event_"):
+                action_text = action_text[len("event_") :]
+            if mode == "core" and action_text not in _TC3_CORE_ACTIONS:
+                continue
+            action = _normalize_action(action_text, allowed_actions)
+            if action is None:
+                continue
+            try:
+                amount = float(raw_count)
+            except (TypeError, ValueError):
+                amount = 1.0
+            if amount <= 0.0:
+                continue
+            _record_process_event(
+                process_rows,
+                action_columns,
+                subject_id,
+                None,
+                action,
+                timestamp_sec=None,
+                target_process_ids=process_id_set,
+                amount=amount,
+            )
+
+    return _finalize_rows(process_rows, action_columns, process_id_set, cfg.ocr_stat_active_threshold_sec)
+
+
+def extract_process_semantic_features_from_tc3_action_counts(
+    process_ids: Iterable[str],
+    action_counts_by_subject: dict[object, object],
+) -> pd.DataFrame:
+    """Compress broad TC3 actions into security-relevant, magnitude-aware features.
+
+    Raw catch-all events are deliberately excluded.  Each semantic family uses
+    ``log1p`` counts, while total volume and the security-action share preserve
+    information that per-row L2 normalization would otherwise discard.
+    """
+    process_id_set = {str(process_id).strip() for process_id in process_ids if str(process_id).strip()}
+    rows: list[dict[str, float | str]] = []
+    for process_id in sorted(process_id_set):
+        raw_counts = action_counts_by_subject.get(process_id, {})
+        row: dict[str, float | str] = {"process_id": process_id}
+        family_counts = {column: 0.0 for column in _TC3_SECURITY_SEMANTIC_COLUMNS[:12]}
+        total_count = 0.0
+        security_count = 0.0
+        if isinstance(raw_counts, dict):
+            for raw_action, raw_count in raw_counts.items():
+                action_text = str(raw_action or "").strip().lower()
+                if action_text.startswith("event_"):
+                    action_text = action_text[len("event_") :]
+                try:
+                    amount = float(raw_count)
+                except (TypeError, ValueError):
+                    amount = 0.0
+                if amount <= 0.0:
+                    continue
+                total_count += amount
+                family = _TC3_SECURITY_ACTION_FAMILIES.get(action_text)
+                if family is None:
+                    continue
+                family_counts[family] += amount
+                security_count += amount
+        for column, count in family_counts.items():
+            row[column] = float(np.log1p(count))
+        row["sem_log_total_events"] = float(np.log1p(total_count))
+        row["sem_log_security_events"] = float(np.log1p(security_count))
+        row["sem_security_event_ratio"] = float(security_count / total_count) if total_count > 0.0 else 0.0
+        rows.append(row)
+    return pd.DataFrame(rows, columns=["process_id", *_TC3_SECURITY_SEMANTIC_COLUMNS]).fillna(0.0)
+
 
 def extract_process_stat_features_from_tc3_event_count(
     cfg: FusionConfig,
@@ -463,6 +625,7 @@ def _extract_tc3_stats(cfg: FusionConfig, process_ids: set[str]) -> pd.DataFrame
     allowed_actions = {column[len("stat_out_") :] for column in action_columns if column.startswith("stat_out_")}
     process_rows: dict[str, dict[str, object]] = {}
     uuid_to_process_id: dict[str, str] = {}
+    trace_subject_rows: dict[str, dict[str, str]] = {}
 
     for log_file in _iter_log_files(cfg.source_logs):
         for line in _iter_lines(log_file):
@@ -481,10 +644,45 @@ def _extract_tc3_stats(cfg: FusionConfig, process_ids: set[str]) -> pd.DataFrame
                 continue
             if cfg.host == "trace":
                 process_id = str(subject.get("cid", "")).strip()
+                if not process_id:
+                    continue
+                trace_subject_rows[uuid] = {
+                    "cid": process_id,
+                    "parent_uuid": _extract_uuid_ref(subject.get("parentSubject")) or "",
+                    "subject_type": str(subject.get("type", "")).strip().upper(),
+                }
             else:
                 process_id = uuid
             if process_id:
                 uuid_to_process_id[uuid] = process_id
+
+    if cfg.host == "trace":
+        owner_cache: dict[str, str] = {}
+
+        def resolve_trace_owner(subject_uuid: str, trail: set[str] | None = None) -> str:
+            subject_uuid = str(subject_uuid)
+            if subject_uuid in owner_cache:
+                return owner_cache[subject_uuid]
+            row = trace_subject_rows.get(subject_uuid)
+            if row is None:
+                return subject_uuid
+            if trail is None:
+                trail = set()
+            if subject_uuid in trail:
+                return str(row.get("cid") or subject_uuid)
+            trail.add(subject_uuid)
+            if row.get("subject_type") == "SUBJECT_UNIT" and row.get("parent_uuid"):
+                owner = resolve_trace_owner(str(row["parent_uuid"]), trail)
+            else:
+                owner = str(row.get("cid") or subject_uuid)
+            trail.remove(subject_uuid)
+            owner_cache[subject_uuid] = owner
+            return owner
+
+        uuid_to_process_id = {
+            subject_uuid: resolve_trace_owner(subject_uuid)
+            for subject_uuid in trace_subject_rows
+        }
 
     for log_file in _iter_log_files(cfg.source_logs):
         for line in _iter_lines(log_file):

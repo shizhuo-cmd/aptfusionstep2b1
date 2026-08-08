@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -133,12 +133,11 @@ def _weighted_regression_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
-    feature_weights: torch.Tensor,
 ) -> torch.Tensor:
-    loss = F.smooth_l1_loss(pred, target, reduction="none")
-    loss = loss * feature_weights.view(1, 1, -1)
+    """Mean squared next-event-vector error over non-padding positions."""
+    loss = F.mse_loss(pred, target, reduction="none")
     loss = loss * mask.unsqueeze(-1)
-    denom = mask.sum().clamp_min(1.0) * float(feature_weights.numel())
+    denom = mask.sum().clamp_min(1.0) * float(pred.shape[-1])
     return loss.sum() / denom
 
 
@@ -158,9 +157,12 @@ def _prepare_sequences(
     max_seq_len: int,
     max_sequences: int | None,
     seed: int,
+    allowed_subject_ids: set[str] | None = None,
 ) -> list[SubjectSequence]:
     items: list[SubjectSequence] = []
     for subject_id, history in subject_map.items():
+        if allowed_subject_ids is not None and str(subject_id) not in allowed_subject_ids:
+            continue
         if not history or len(history) < 2:
             continue
         values = np.asarray(history, dtype=np.float32)
@@ -202,16 +204,20 @@ def _collect_subject_histories(
     cadets_logs: Path,
     workspace: Path,
     device: torch.device,
-) -> tuple[dict[str, list[list[float]]], dict[str, list[list[float]]]]:
+    hosts: tuple[str, ...],
+) -> dict[str, dict[str, list[list[float]]]]:
     _copy_vendor_support_files(workspace)
     vendor = _load_vendor_darpa()
     vendor.device = device
+    histories: dict[str, dict[str, list[list[float]]]] = {}
     with _temporary_cwd(workspace):
-        trace_subjects, trace_objects, trace_events, _ = vendor.parser_trace(str(trace_logs) + os.sep)
-        trace_map = vendor.encode_trace(trace_subjects, trace_objects, trace_events)
-        cadets_subjects, cadets_objects, cadets_events, _ = vendor.parser_cadets(str(cadets_logs) + os.sep)
-        cadets_map = vendor.encode_cadets(cadets_subjects, cadets_objects, cadets_events)
-    return trace_map, cadets_map
+        if "trace" in hosts:
+            trace_subjects, trace_objects, trace_events, _ = vendor.parser_trace(str(trace_logs) + os.sep)
+            histories["trace"] = vendor.encode_trace(trace_subjects, trace_objects, trace_events)
+        if "cadets" in hosts:
+            cadets_subjects, cadets_objects, cadets_events, _ = vendor.parser_cadets(str(cadets_logs) + os.sep)
+            histories["cadets"] = vendor.encode_cadets(cadets_subjects, cadets_objects, cadets_events)
+    return histories
 
 
 def _build_scales(items: list[SubjectSequence]) -> list[float]:
@@ -229,10 +235,14 @@ def run_pretraining(
     trace_logs: Path,
     cadets_logs: Path,
     output_dir: Path,
-    epochs: int = 8,
+    hosts: tuple[str, ...] = ("trace", "cadets"),
+    allowed_subject_ids_by_host: dict[str, set[str]] | None = None,
+    epochs: int = 24,
     batch_size: int = 256,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-4,
+    lr: float = 0.1,
+    lr_decay_factor: float = 0.1,
+    lr_decay_rate: int = 500,
+    max_optimizer_steps: int = 1500,
     max_seq_len: int = 128,
     val_fraction: float = 0.1,
     max_trace_sequences: int | None = None,
@@ -252,55 +262,47 @@ def run_pretraining(
         torch.cuda.manual_seed_all(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    trace_map, cadets_map = _collect_subject_histories(
+    selected_hosts = tuple(host for host in hosts if host in {"trace", "cadets"})
+    if not selected_hosts:
+        raise ValueError("hosts must include trace and/or cadets")
+    histories_by_host = _collect_subject_histories(
         trace_logs=trace_logs,
         cadets_logs=cadets_logs,
         workspace=workspace,
         device=device,
+        hosts=selected_hosts,
     )
-    trace_items = _prepare_sequences(
-        "trace",
-        trace_map,
-        max_seq_len=max_seq_len,
-        max_sequences=max_trace_sequences,
-        seed=seed,
-    )
-    cadets_items = _prepare_sequences(
-        "cadets",
-        cadets_map,
-        max_seq_len=max_seq_len,
-        max_sequences=max_cadets_sequences,
-        seed=seed + 1,
-    )
-
-    trace_train, trace_val = _split_train_val(trace_items, seed=seed, val_fraction=val_fraction)
-    cadets_train, cadets_val = _split_train_val(cadets_items, seed=seed + 1, val_fraction=val_fraction)
-    train_items = trace_train + cadets_train
-    val_items = trace_val + cadets_val
+    items_by_host: dict[str, list[SubjectSequence]] = {}
+    train_by_host: dict[str, list[SubjectSequence]] = {}
+    val_by_host: dict[str, list[SubjectSequence]] = {}
+    for host_index, host in enumerate(selected_hosts):
+        items_by_host[host] = _prepare_sequences(
+            host,
+            histories_by_host.get(host, {}),
+            max_seq_len=max_seq_len,
+            max_sequences=max_trace_sequences if host == "trace" else max_cadets_sequences,
+            seed=seed + host_index,
+            allowed_subject_ids=(allowed_subject_ids_by_host or {}).get(host),
+        )
+        train_by_host[host], val_by_host[host] = _split_train_val(
+            items_by_host[host],
+            seed=seed + host_index,
+            val_fraction=val_fraction,
+        )
+    train_items = [item for host in selected_hosts for item in train_by_host[host]]
+    val_items = [item for host in selected_hosts for item in val_by_host[host]]
     if not train_items:
         raise RuntimeError("No training sequences available for TC3 pretraining")
 
     scales = _build_scales(train_items)
     scales_tensor = torch.tensor(scales, dtype=torch.float32, device=device)
-    feature_weights = torch.tensor([2.0, 0.25, 1.0, 1.0, 1.0, 1.0], dtype=torch.float32, device=device)
-
     train_dataset = TC3SequenceDataset(train_items)
     val_dataset = TC3SequenceDataset(val_items)
-
-    host_counts: dict[str, int] = {}
-    for item in train_items:
-        host_counts[item.host] = host_counts.get(item.host, 0) + 1
-    sample_weights = [1.0 / float(host_counts[item.host]) for item in train_items]
-    sampler = WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(train_items),
-        replacement=True,
-    )
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        sampler=sampler,
+        shuffle=True,
         collate_fn=_collate_sequences,
         num_workers=0,
     )
@@ -313,14 +315,20 @@ def run_pretraining(
     )
 
     model = TC3StackedLSTMPretrain().to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    best_state = copy.deepcopy(model.state_dict())
-    best_val_loss = float("inf")
-    patience = 3
-    patience_left = patience
+    # TAPAS reports lr=0.1, decay factor=0.1 and decay rate=500 for this encoder.
+    # The paper does not define the optimizer or the decay unit, so we use Adam and
+    # apply StepLR after every optimizer update; this makes "500" unambiguous.
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=int(lr_decay_rate),
+        gamma=float(lr_decay_factor),
+    )
+    optimizer_steps = 0
     epoch_summaries: list[dict[str, Any]] = []
 
-    def run_epoch(loader: DataLoader, train_mode: bool) -> float:
+    def run_epoch(loader: DataLoader, train_mode: bool) -> tuple[float, bool]:
+        nonlocal optimizer_steps
         if train_mode:
             model.train()
         else:
@@ -328,6 +336,8 @@ def run_pretraining(
         total_loss = 0.0
         total_steps = 0
         for batch in loader:
+            if train_mode and optimizer_steps >= int(max_optimizer_steps):
+                break
             inputs = batch["inputs"].to(device=device, dtype=torch.float32)
             lengths = batch["lengths"].to(device)
             if inputs.shape[1] < 2:
@@ -343,38 +353,36 @@ def run_pretraining(
                 .expand(inputs.shape[0], step_count)
                 < (lengths - 1).unsqueeze(1)
             ).to(dtype=torch.float32)
-            loss = _weighted_regression_loss(pred_norm, target_norm, mask, feature_weights)
+            loss = _weighted_regression_loss(pred_norm, target_norm, mask)
             if train_mode:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
+                scheduler.step()
+                optimizer_steps += 1
             total_loss += float(loss.detach().cpu().item()) * int(mask.sum().item())
             total_steps += int(mask.sum().item())
         if total_steps <= 0:
-            return 0.0
-        return total_loss / float(total_steps)
+            return 0.0, False
+        return total_loss / float(total_steps), optimizer_steps >= int(max_optimizer_steps)
 
     for epoch in range(1, epochs + 1):
-        train_loss = run_epoch(train_loader, True)
-        val_loss = run_epoch(val_loader, False) if len(val_dataset) > 0 else train_loss
+        train_loss, reached_max_steps = run_epoch(train_loader, True)
+        val_loss, _ = run_epoch(val_loader, False) if len(val_dataset) > 0 else (train_loss, False)
         epoch_summary = {
             "epoch": epoch,
             "train_loss": train_loss,
             "val_loss": val_loss,
+            "optimizer_steps": optimizer_steps,
+            "learning_rate": float(optimizer.param_groups[0]["lr"]),
         }
         epoch_summaries.append(epoch_summary)
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_state = copy.deepcopy(model.state_dict())
-            patience_left = patience
-        else:
-            patience_left -= 1
-            if patience_left <= 0:
-                break
+        if reached_max_steps:
+            break
 
     best_model_path = output_dir / "stackedlstm_tc_retrained_trace_cadets_20260707.pt"
-    torch.save(best_state, best_model_path)
+    torch.save(model.state_dict(), best_model_path)
     manifest = {
         "status": "completed",
         "seed": seed,
@@ -385,25 +393,39 @@ def run_pretraining(
         "best_model_path": str(best_model_path),
         "epochs_requested": epochs,
         "epochs_ran": len(epoch_summaries),
-        "best_val_loss": best_val_loss,
         "batch_size": batch_size,
         "lr": lr,
-        "weight_decay": weight_decay,
+        "lr_decay_factor": lr_decay_factor,
+        "lr_decay_rate_optimizer_steps": lr_decay_rate,
+        "max_optimizer_steps": max_optimizer_steps,
+        "optimizer_steps_completed": optimizer_steps,
+        "optimizer": "Adam",
+        "loss": "masked_mse_on_normalized_next_event_vector",
         "max_seq_len": max_seq_len,
         "val_fraction": val_fraction,
         "max_trace_sequences": max_trace_sequences,
         "max_cadets_sequences": max_cadets_sequences,
         "feature_scales": scales,
-        "feature_weights": [float(x) for x in feature_weights.detach().cpu().tolist()],
         "sequence_counts": {
-            "trace_total": len(trace_items),
-            "trace_train": len(trace_train),
-            "trace_val": len(trace_val),
-            "cadets_total": len(cadets_items),
-            "cadets_train": len(cadets_train),
-            "cadets_val": len(cadets_val),
+            **{
+                f"{host}_total": len(items_by_host[host])
+                for host in selected_hosts
+            },
+            **{
+                f"{host}_train": len(train_by_host[host])
+                for host in selected_hosts
+            },
+            **{
+                f"{host}_val": len(val_by_host[host])
+                for host in selected_hosts
+            },
             "combined_train": len(train_items),
             "combined_val": len(val_items),
+        },
+        "hosts": list(selected_hosts),
+        "allowed_subject_counts": {
+            host: len((allowed_subject_ids_by_host or {}).get(host, set()))
+            for host in selected_hosts
         },
         "epoch_summaries": epoch_summaries,
     }
@@ -419,10 +441,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--trace-logs", type=Path, required=True)
     parser.add_argument("--cadets-logs", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--epochs", type=int, default=8)
+    parser.add_argument("--hosts", default="trace,cadets")
+    parser.add_argument("--epochs", type=int, default=24)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--lr-decay-factor", type=float, default=0.1)
+    parser.add_argument("--lr-decay-rate", type=int, default=500)
+    parser.add_argument("--max-optimizer-steps", type=int, default=1500)
     parser.add_argument("--max-seq-len", type=int, default=128)
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--max-trace-sequences", type=int, default=0)
@@ -437,10 +462,13 @@ def main() -> int:
         trace_logs=args.trace_logs,
         cadets_logs=args.cadets_logs,
         output_dir=args.output_dir,
+        hosts=tuple(host.strip() for host in args.hosts.split(",") if host.strip()),
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
-        weight_decay=args.weight_decay,
+        lr_decay_factor=args.lr_decay_factor,
+        lr_decay_rate=args.lr_decay_rate,
+        max_optimizer_steps=args.max_optimizer_steps,
         max_seq_len=args.max_seq_len,
         val_fraction=args.val_fraction,
         max_trace_sequences=None if args.max_trace_sequences <= 0 else args.max_trace_sequences,

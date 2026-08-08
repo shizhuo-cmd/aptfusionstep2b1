@@ -2,28 +2,27 @@ ocr_apt_root: ""
 tapas_root: ""
 
 dataset_family: "tc3"
-host: "trace"
-source_logs: "/root/autodl-tmp/data/trace_train/logs"
+host: "cadets"
+source_logs: "/root/autodl-tmp/data/cadets/logs"
 
-artifacts_dir: "/root/autodl-tmp/APT-Fusionstep2b1/artifacts_trace_normal_only_multimodal_20260730"
-ocr_runtime_root: "/root/autodl-tmp/APT-Fusionstep2b1/runtime/darpa_tc3/trace_normal_only_multimodal_20260730/experiments/"
+artifacts_dir: "/root/autodl-tmp/APT-Fusionstep2b1/artifacts_cadets_normal_only_eventstats_extended_20260731"
+ocr_runtime_root: "/root/autodl-tmp/APT-Fusionstep2b1/runtime/darpa_tc3/cadets_normal_only_eventstats_extended_20260731/experiments/"
 ocr_exp_name: "fusion_exp"
-ocr_model_name: "normal_only_trace_20260730.pkl"
+ocr_model_name: "normal_only_cadets_eventstats_extended_20260731.pkl"
 ocr_inv_exp_name: "fusion_investigation"
 
 use_sequence_embeddings: true
 use_ocr_stat_features: true
-graphsage_append_ocr_stat_features: false
+graphsage_append_ocr_stat_features: true
+task_tc3_event_stats_mode: "extended"
 task_graph_stat_late_fusion_enabled: false
 
 task_detection_backend: "tapas_native"
 task_detector_mode: "normal_only"
-task_detector_model_input: ""
-task_detector_model_output: "/root/autodl-tmp/APT-Fusionstep2b1/artifacts_trace_normal_only_multimodal_20260730/module2/normal_only_model.pkl"
-task_ground_truth_path: "/root/autodl-tmp/APT-Fusionstep2b1/data/trace_full/trace_ground_truth.txt"
+task_detector_model_output: "/root/autodl-tmp/APT-Fusionstep2b1/artifacts_cadets_normal_only_eventstats_extended_20260731/module2/normal_only_model.pkl"
+task_ground_truth_path: "/root/autodl-tmp/data/cadets/cadets.txt"
 random_seed: 173
 
-# Fit normal process and task prototypes from benign tasks only.
 task_normal_only_train_fraction: 0.70
 task_normal_only_validation_fraction: 0.15
 task_normal_only_task_prototypes: 8
@@ -33,12 +32,10 @@ task_normal_only_local_top_k: 3
 task_normal_only_global_weight: 0.40
 task_normal_only_validation_fpr: 0.02
 
-# These remain explicit for reproducible module1 inputs but are unused by normal-only module2.
 task_tapas_augmentation_enabled: false
 task_component_split_mode: "fanout"
 task_component_child_threshold: 2
 task_component_count_segmented_children_upstream: false
 task_graph_bidirectional_edges: false
 task_graph_self_loops: false
-
 path_reason_enabled: false
