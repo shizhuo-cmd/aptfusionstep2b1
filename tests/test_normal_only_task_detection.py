@@ -14,6 +14,8 @@ def _config() -> SimpleNamespace:
         task_normal_only_train_fraction=0.60,
         task_normal_only_validation_fraction=0.20,
         task_normal_only_node_sample_limit=1000,
+        task_normal_only_node_feature_mode="all",
+        task_normal_only_node_audit_enabled=False,
         task_normal_only_node_prototypes=3,
         task_normal_only_task_prototypes=3,
         task_normal_only_local_top_k=2,
@@ -85,6 +87,35 @@ def test_normal_only_detector_supports_size_aware_local_scores_and_graph_knn(tmp
 
     assert info["global_model"] == "knn"
     assert info["local_top_k_mode"] == "sqrt"
+
+
+def test_normal_only_sequence_only_audit_exports_process_level_scores(tmp_path: Path) -> None:
+    pairs = [_graph(index, 0) for index in range(24)] + [_graph(100, 1), _graph(101, 1)]
+    graphs = [pair[0] for pair in pairs]
+    metas = [pair[1] for pair in pairs]
+    ground_truth = tmp_path / "ground_truth.txt"
+    ground_truth.write_text("p100_root\np101_root\n", encoding="utf-8")
+    cfg = _config()
+    cfg.task_normal_only_node_feature_mode = "sequence_only"
+    cfg.task_normal_only_node_audit_enabled = True
+    cfg.task_ground_truth_path = ground_truth
+
+    rows, _, info = _run_normal_only_tc3(
+        cfg,
+        {
+            "selected_graphs": graphs,
+            "selected_graph_metas": metas,
+            "base_sequence_feature_dim": 2,
+            "thread_merge_metadata": {},
+        },
+        tmp_path / "normal_only_sequence.pkl",
+    )
+
+    assert info["node_feature_mode"] == "sequence_only"
+    assert info["node_feature_dim"] == 2
+    assert info["node_audit_enabled"] is True
+    assert (tmp_path / "normal_only_node_audit.json").exists()
+    assert any(row["top_processes"] for row in rows)
 
 
 def test_synthetic_root_isolation_emits_direct_child_tasks_without_parent_shell() -> None:

@@ -3403,10 +3403,30 @@ def _normal_only_temporal_split(
     }
 
 
-def _normal_only_graph_feature(graph: dict[str, Any], meta: dict[str, Any]) -> np.ndarray:
+def _normal_only_node_feature_view(
+    nodes: np.ndarray,
+    cfg: FusionConfig,
+    sequence_feature_dim: int,
+) -> np.ndarray:
+    """Select the frozen TAPAS sequence features when running the LSTM-only ablation."""
+    mode = str(getattr(cfg, "task_normal_only_node_feature_mode", "all"))
+    if mode == "all":
+        return nodes
+    if sequence_feature_dim <= 0 or sequence_feature_dim > nodes.shape[1]:
+        raise ValueError("sequence_only normal-only scoring requires a valid base_sequence_feature_dim")
+    return nodes[:, :sequence_feature_dim]
+
+
+def _normal_only_graph_feature(
+    graph: dict[str, Any],
+    meta: dict[str, Any],
+    cfg: FusionConfig,
+    sequence_feature_dim: int,
+) -> np.ndarray:
     nodes = np.asarray(graph.get("nodes", []), dtype=np.float64)
     if nodes.ndim != 2 or nodes.shape[0] == 0:
         raise ValueError(f"task {meta.get('task_id', '')} has no usable node features")
+    nodes = _normal_only_node_feature_view(nodes, cfg, sequence_feature_dim)
     root_id = str(meta.get("task_root_id", ""))
     node_ids = [str(node) for node in meta.get("node_ids", [])]
     try:
@@ -3431,16 +3451,30 @@ def _normal_only_graph_matrix(
     graphs: Sequence[dict[str, Any]],
     graph_metas: Sequence[dict[str, Any]],
     indices: Sequence[int],
+    cfg: FusionConfig,
+    sequence_feature_dim: int,
 ) -> np.ndarray:
     return np.asarray(
-        [_normal_only_graph_feature(graphs[index], graph_metas[index]) for index in indices],
+        [
+            _normal_only_graph_feature(graphs[index], graph_metas[index], cfg, sequence_feature_dim)
+            for index in indices
+        ],
         dtype=np.float64,
     )
 
 
-def _normal_only_node_matrix(graphs: Sequence[dict[str, Any]], indices: Sequence[int]) -> np.ndarray:
+def _normal_only_node_matrix(
+    graphs: Sequence[dict[str, Any]],
+    indices: Sequence[int],
+    cfg: FusionConfig,
+    sequence_feature_dim: int,
+) -> np.ndarray:
     matrices = [
-        np.asarray(graphs[index].get("nodes", []), dtype=np.float64)
+        _normal_only_node_feature_view(
+            np.asarray(graphs[index].get("nodes", []), dtype=np.float64),
+            cfg,
+            sequence_feature_dim,
+        )
         for index in indices
         if len(graphs[index].get("nodes", [])) > 0
     ]
@@ -3477,20 +3511,35 @@ def _normal_only_local_keep_count(cfg: FusionConfig, node_count: int) -> int:
     return min(max(1, requested), max(1, node_count))
 
 
-def _normal_only_node_local_scores(
+def _normal_only_node_distance_vectors(
     cfg: FusionConfig,
     graphs: Sequence[dict[str, Any]],
     indices: Sequence[int],
     node_scaler: StandardScaler,
     node_model: MiniBatchKMeans,
-) -> np.ndarray:
-    scores: list[float] = []
+    sequence_feature_dim: int,
+) -> list[np.ndarray]:
+    distances_by_graph: list[np.ndarray] = []
     for index in indices:
         nodes = np.asarray(graphs[index].get("nodes", []), dtype=np.float64)
         if nodes.ndim != 2 or len(nodes) == 0:
+            distances_by_graph.append(np.asarray([], dtype=np.float64))
+            continue
+        nodes = _normal_only_node_feature_view(nodes, cfg, sequence_feature_dim)
+        distances = node_model.transform(node_scaler.transform(nodes)).min(axis=1)
+        distances_by_graph.append(distances.astype(np.float64))
+    return distances_by_graph
+
+
+def _normal_only_topk_means(
+    cfg: FusionConfig,
+    distances_by_graph: Sequence[np.ndarray],
+) -> np.ndarray:
+    scores: list[float] = []
+    for distances in distances_by_graph:
+        if len(distances) == 0:
             scores.append(0.0)
             continue
-        distances = node_model.transform(node_scaler.transform(nodes)).min(axis=1)
         keep = _normal_only_local_keep_count(cfg, len(distances))
         scores.append(float(np.partition(distances, len(distances) - keep)[-keep:].mean()))
     return np.asarray(scores, dtype=np.float64)
@@ -3540,6 +3589,91 @@ def _normal_only_combine_scores(
     return ((1.0 - float(global_weight)) * local_normalized) + (float(global_weight) * global_normalized)
 
 
+def _normal_only_process_audit(
+    metas: Sequence[dict[str, Any]],
+    indices: Sequence[int],
+    distances_by_graph: Sequence[np.ndarray],
+    ground_truth: set[str],
+    node_threshold: float,
+    cfg: FusionConfig,
+) -> tuple[list[list[dict[str, Any]]], dict[str, Any]]:
+    """Evaluate process ranking after fitting only on benign task graphs.
+
+    Ground truth is used here only to report final localization quality.  It is
+    never passed to the scaler, KMeans model, or calibration threshold.
+    """
+    top_processes_by_graph: list[list[dict[str, Any]]] = []
+    unique_processes: dict[str, dict[str, Any]] = {}
+    localization_hits = {"top_1": 0, "top_3": 0, "dynamic_top_k": 0}
+    positive_task_count = 0
+
+    for index, distances in zip(indices, distances_by_graph):
+        meta = metas[index]
+        node_ids = [str(node) for node in meta.get("node_ids", [])]
+        ranked_indices = np.argsort(-distances, kind="stable") if len(distances) else np.asarray([], dtype=int)
+        keep = _normal_only_local_keep_count(cfg, len(distances)) if len(distances) else 0
+        ranked: list[dict[str, Any]] = []
+        for rank, node_index in enumerate(ranked_indices.tolist(), start=1):
+            if node_index >= len(node_ids):
+                continue
+            process_id = node_ids[node_index]
+            score = float(distances[node_index])
+            record = {
+                "process_id": process_id,
+                "node_anomaly_score": score,
+                "rank": rank,
+                "in_local_top_k": bool(rank <= keep),
+            }
+            ranked.append(record)
+            current = unique_processes.get(process_id)
+            if current is None or score > float(current["node_anomaly_score"]):
+                unique_processes[process_id] = {
+                    **record,
+                    "ground_truth_label": int(process_id in ground_truth),
+                    "task_id": str(meta.get("task_id", f"task_{index:04d}")),
+                }
+        top_processes_by_graph.append(ranked[:keep])
+
+        if int(meta.get("label", 0)):
+            positive_task_count += 1
+            positive_ids = set(node_ids) & ground_truth
+            for name, candidate_count in (("top_1", 1), ("top_3", 3), ("dynamic_top_k", keep)):
+                if positive_ids and any(item["process_id"] in positive_ids for item in ranked[:candidate_count]):
+                    localization_hits[name] += 1
+
+    process_rows = sorted(
+        unique_processes.values(),
+        key=lambda item: (-float(item["node_anomaly_score"]), item["process_id"]),
+    )
+    labels = np.asarray([row["ground_truth_label"] for row in process_rows], dtype=np.int64)
+    scores = np.asarray([row["node_anomaly_score"] for row in process_rows], dtype=np.float64)
+    predicted = (scores >= float(node_threshold)).astype(np.int64) if len(scores) else np.asarray([], dtype=np.int64)
+    metrics: dict[str, Any] = {
+        "evaluation_unique_process_count": int(len(process_rows)),
+        "evaluation_ground_truth_process_count": int(labels.sum()),
+        "node_threshold": float(node_threshold),
+        "node_threshold_source": "benign_validation_node_quantile",
+        "localization_task_count": int(positive_task_count),
+        "top_1_localization_recall": float(localization_hits["top_1"] / positive_task_count) if positive_task_count else 0.0,
+        "top_3_localization_recall": float(localization_hits["top_3"] / positive_task_count) if positive_task_count else 0.0,
+        "dynamic_top_k_localization_recall": float(localization_hits["dynamic_top_k"] / positive_task_count)
+        if positive_task_count
+        else 0.0,
+    }
+    if len(labels) and len(np.unique(labels)) == 2:
+        precision, recall, f1, _ = precision_recall_fscore_support(labels, predicted, average="binary", zero_division=0)
+        metrics.update(
+            {
+                "node_precision": float(precision),
+                "node_recall": float(recall),
+                "node_f1": float(f1),
+                "node_roc_auc": float(roc_auc_score(labels, scores)),
+                "node_pr_auc": float(average_precision_score(labels, scores)),
+            }
+        )
+    return top_processes_by_graph, {"metrics": metrics, "processes": process_rows}
+
+
 def _run_normal_only_tc3(
     cfg: FusionConfig,
     bundle: dict[str, Any],
@@ -3554,9 +3688,10 @@ def _run_normal_only_tc3(
     train_indices = list(split["train_indices"])
     validation_indices = list(split["validation_indices"])
     evaluation_indices = list(split["evaluation_indices"])
+    feature_dim = int(bundle.get("base_sequence_feature_dim", bundle.get("sequence_feature_dim", 0)))
 
     train_nodes = _normal_only_sample_rows(
-        _normal_only_node_matrix(graphs, train_indices),
+        _normal_only_node_matrix(graphs, train_indices, cfg, feature_dim),
         int(cfg.task_normal_only_node_sample_limit),
         int(cfg.random_seed),
     )
@@ -3567,18 +3702,22 @@ def _run_normal_only_tc3(
         int(cfg.random_seed),
     )
 
-    train_graph_matrix = _normal_only_graph_matrix(graphs, metas, train_indices)
+    train_graph_matrix = _normal_only_graph_matrix(graphs, metas, train_indices, cfg, feature_dim)
     graph_scaler = StandardScaler().fit(train_graph_matrix)
     graph_model, graph_model_mode = _normal_only_fit_global_model(
         graph_scaler.transform(train_graph_matrix),
         cfg,
     )
 
-    validation_local = _normal_only_node_local_scores(
-        cfg, graphs, validation_indices, node_scaler, node_model
+    validation_distances = _normal_only_node_distance_vectors(
+        cfg, graphs, validation_indices, node_scaler, node_model, feature_dim
     )
+    validation_local = _normal_only_topk_means(cfg, validation_distances)
     validation_global = _normal_only_global_scores(
-        _normal_only_graph_matrix(graphs, metas, validation_indices), graph_scaler, graph_model, graph_model_mode
+        _normal_only_graph_matrix(graphs, metas, validation_indices, cfg, feature_dim),
+        graph_scaler,
+        graph_model,
+        graph_model_mode,
     )
     local_center, local_scale = _normal_only_robust_scale(validation_local)
     global_center, global_scale = _normal_only_robust_scale(validation_global)
@@ -3593,11 +3732,15 @@ def _run_normal_only_tc3(
     )
     threshold = float(np.quantile(validation_scores, 1.0 - float(cfg.task_normal_only_validation_fpr)))
 
-    evaluation_local = _normal_only_node_local_scores(
-        cfg, graphs, evaluation_indices, node_scaler, node_model
+    evaluation_distances = _normal_only_node_distance_vectors(
+        cfg, graphs, evaluation_indices, node_scaler, node_model, feature_dim
     )
+    evaluation_local = _normal_only_topk_means(cfg, evaluation_distances)
     evaluation_global = _normal_only_global_scores(
-        _normal_only_graph_matrix(graphs, metas, evaluation_indices), graph_scaler, graph_model, graph_model_mode
+        _normal_only_graph_matrix(graphs, metas, evaluation_indices, cfg, feature_dim),
+        graph_scaler,
+        graph_model,
+        graph_model_mode,
     )
     evaluation_scores = _normal_only_combine_scores(
         evaluation_local,
@@ -3609,12 +3752,35 @@ def _run_normal_only_tc3(
         float(cfg.task_normal_only_global_weight),
     )
 
+    top_processes_by_graph: list[list[dict[str, Any]]] = [[] for _ in evaluation_indices]
+    node_audit: dict[str, Any] | None = None
+    if bool(getattr(cfg, "task_normal_only_node_audit_enabled", False)):
+        validation_node_vectors = [item for item in validation_distances if len(item)]
+        if not validation_node_vectors:
+            raise ValueError("normal-only node audit found no benign validation process vectors")
+        validation_node_distances = np.concatenate(validation_node_vectors)
+        node_threshold = float(np.quantile(validation_node_distances, 1.0 - float(cfg.task_normal_only_validation_fpr)))
+        canonical_ground_truth = _canonicalize_ground_truth_nodes(
+            _load_ground_truth(cfg.task_ground_truth_path),
+            bundle.get("thread_merge_metadata"),
+        )
+        top_processes_by_graph, node_audit = _normal_only_process_audit(
+            metas,
+            evaluation_indices,
+            evaluation_distances,
+            canonical_ground_truth,
+            node_threshold,
+            cfg,
+        )
+        save_json(model_path.with_name("normal_only_node_audit.json"), node_audit)
+
     rows: list[dict[str, Any]] = []
-    for index, local_score, global_score, final_score in zip(
+    for index, local_score, global_score, final_score, top_processes in zip(
         evaluation_indices,
         evaluation_local.tolist(),
         evaluation_global.tolist(),
         evaluation_scores.tolist(),
+        top_processes_by_graph,
     ):
         graph = graphs[index]
         meta = metas[index]
@@ -3639,6 +3805,7 @@ def _run_normal_only_tc3(
                 "task_size": int(meta.get("task_size", len(graph.get("nodes", [])))),
                 "internal_edge_count": int(meta.get("internal_edge_count", len(graph.get("edges", [])))),
                 "process_ids": [str(node) for node in meta.get("node_ids", [])],
+                "top_processes": top_processes,
                 "process_stat_overrides": copy.deepcopy(meta.get("process_stat_overrides", {})),
             }
         )
@@ -3665,15 +3832,22 @@ def _run_normal_only_tc3(
             "local_top_k_max": int(getattr(cfg, "task_normal_only_local_top_k_max", 16)),
             "global_weight": float(cfg.task_normal_only_global_weight),
             "validation_fpr": float(cfg.task_normal_only_validation_fpr),
+            "node_feature_mode": str(getattr(cfg, "task_normal_only_node_feature_mode", "all")),
         },
     }
     ensure_parent(model_path)
     with model_path.open("wb") as fh:
         pickle.dump(model, fh)
+    audit_metrics = node_audit["metrics"] if node_audit else {}
     return rows, _rows_metrics(rows), {
         **copy.deepcopy(split["summary"]),
         "node_training_sample_count": int(len(train_nodes)),
         "node_prototype_count": int(node_model.n_clusters),
+        "node_feature_mode": str(getattr(cfg, "task_normal_only_node_feature_mode", "all")),
+        "node_feature_dim": int(train_nodes.shape[1]),
+        "node_audit_enabled": bool(node_audit),
+        "node_audit_path": str(model_path.with_name("normal_only_node_audit.json")) if node_audit else "",
+        "node_audit_metrics": audit_metrics,
         "task_prototype_count": int(graph_model.n_clusters) if graph_model_mode == "kmeans" else 0,
         "global_model": graph_model_mode,
         "global_knn_neighbors": int(getattr(graph_model, "n_neighbors", 0)),

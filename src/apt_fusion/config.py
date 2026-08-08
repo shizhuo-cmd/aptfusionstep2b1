@@ -50,6 +50,10 @@ class FusionConfig:
     task_normal_only_task_prototypes: int = 8
     task_normal_only_node_prototypes: int = 32
     task_normal_only_node_sample_limit: int = 100000
+    # ``sequence_only`` evaluates the frozen TAPAS LSTM-GRU representation
+    # without appended event-statistics features.
+    task_normal_only_node_feature_mode: str = "all"
+    task_normal_only_node_audit_enabled: bool = False
     task_normal_only_local_top_k: int = 3
     task_normal_only_local_top_k_mode: str = "fixed"
     task_normal_only_local_top_k_max: int = 16
@@ -260,6 +264,8 @@ def load_config(path: str | Path) -> FusionConfig:
         task_normal_only_task_prototypes=int(_get(data, "task_normal_only_task_prototypes", 8)),
         task_normal_only_node_prototypes=int(_get(data, "task_normal_only_node_prototypes", 32)),
         task_normal_only_node_sample_limit=int(_get(data, "task_normal_only_node_sample_limit", 100000)),
+        task_normal_only_node_feature_mode=str(_get(data, "task_normal_only_node_feature_mode", "all")),
+        task_normal_only_node_audit_enabled=bool(_get(data, "task_normal_only_node_audit_enabled", False)),
         task_normal_only_local_top_k=int(_get(data, "task_normal_only_local_top_k", 3)),
         task_normal_only_local_top_k_mode=str(_get(data, "task_normal_only_local_top_k_mode", "fixed")),
         task_normal_only_local_top_k_max=int(_get(data, "task_normal_only_local_top_k_max", 16)),
@@ -532,6 +538,9 @@ def _validate(cfg: FusionConfig) -> None:
 
     if cfg.task_normal_only_node_sample_limit <= 0:
         raise ValueError("task_normal_only_node_sample_limit must be > 0")
+
+    if cfg.task_normal_only_node_feature_mode not in {"all", "sequence_only"}:
+        raise ValueError("task_normal_only_node_feature_mode must be 'all' or 'sequence_only'")
 
     if cfg.task_normal_only_local_top_k <= 0:
         raise ValueError("task_normal_only_local_top_k must be > 0")
