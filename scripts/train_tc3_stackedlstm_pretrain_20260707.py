@@ -202,22 +202,40 @@ def _collect_subject_histories(
     *,
     trace_logs: Path,
     cadets_logs: Path,
+    theia_logs: Path | None,
     workspace: Path,
     device: torch.device,
     hosts: tuple[str, ...],
-) -> dict[str, dict[str, list[list[float]]]]:
+) -> tuple[dict[str, dict[str, list[list[float]]]], dict[str, dict[str, Any]]]:
     _copy_vendor_support_files(workspace)
     vendor = _load_vendor_darpa()
     vendor.device = device
     histories: dict[str, dict[str, list[list[float]]]] = {}
+    parser_summaries: dict[str, dict[str, Any]] = {}
     with _temporary_cwd(workspace):
         if "trace" in hosts:
             trace_subjects, trace_objects, trace_events, _ = vendor.parser_trace(str(trace_logs) + os.sep)
             histories["trace"] = vendor.encode_trace(trace_subjects, trace_objects, trace_events)
+            parser_summaries["trace"] = {
+                "canonical_process_subject_count": len(trace_subjects),
+                "active_sequence_subject_count": len(histories["trace"]),
+            }
         if "cadets" in hosts:
             cadets_subjects, cadets_objects, cadets_events, _ = vendor.parser_cadets(str(cadets_logs) + os.sep)
             histories["cadets"] = vendor.encode_cadets(cadets_subjects, cadets_objects, cadets_events)
-    return histories
+            parser_summaries["cadets"] = {
+                "canonical_process_subject_count": len(cadets_subjects),
+                "active_sequence_subject_count": len(histories["cadets"]),
+            }
+        if "theia" in hosts:
+            if theia_logs is None:
+                raise ValueError("theia_logs is required when hosts includes 'theia'")
+            histories["theia"], theia_summary = vendor.filters(
+                str(theia_logs) + os.sep,
+                return_sequence_histories=True,
+            )
+            parser_summaries["theia"] = dict(theia_summary)
+    return histories, parser_summaries
 
 
 def _build_scales(items: list[SubjectSequence]) -> list[float]:
@@ -234,6 +252,7 @@ def run_pretraining(
     *,
     trace_logs: Path,
     cadets_logs: Path,
+    theia_logs: Path | None = None,
     output_dir: Path,
     hosts: tuple[str, ...] = ("trace", "cadets"),
     allowed_subject_ids_by_host: dict[str, set[str]] | None = None,
@@ -247,6 +266,7 @@ def run_pretraining(
     val_fraction: float = 0.1,
     max_trace_sequences: int | None = None,
     max_cadets_sequences: int | None = 50000,
+    max_theia_sequences: int | None = None,
     seed: int = 173,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -262,12 +282,13 @@ def run_pretraining(
         torch.cuda.manual_seed_all(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    selected_hosts = tuple(host for host in hosts if host in {"trace", "cadets"})
+    selected_hosts = tuple(host for host in hosts if host in {"trace", "cadets", "theia"})
     if not selected_hosts:
-        raise ValueError("hosts must include trace and/or cadets")
-    histories_by_host = _collect_subject_histories(
+        raise ValueError("hosts must include trace, cadets, and/or theia")
+    histories_by_host, parser_summaries = _collect_subject_histories(
         trace_logs=trace_logs,
         cadets_logs=cadets_logs,
+        theia_logs=theia_logs,
         workspace=workspace,
         device=device,
         hosts=selected_hosts,
@@ -280,7 +301,11 @@ def run_pretraining(
             host,
             histories_by_host.get(host, {}),
             max_seq_len=max_seq_len,
-            max_sequences=max_trace_sequences if host == "trace" else max_cadets_sequences,
+            max_sequences={
+                "trace": max_trace_sequences,
+                "cadets": max_cadets_sequences,
+                "theia": max_theia_sequences,
+            }[host],
             seed=seed + host_index,
             allowed_subject_ids=(allowed_subject_ids_by_host or {}).get(host),
         )
@@ -381,7 +406,7 @@ def run_pretraining(
         if reached_max_steps:
             break
 
-    best_model_path = output_dir / "stackedlstm_tc_retrained_trace_cadets_20260707.pt"
+    best_model_path = output_dir / f"stackedlstm_tc_retrained_{'_'.join(selected_hosts)}_20260809.pt"
     torch.save(model.state_dict(), best_model_path)
     manifest = {
         "status": "completed",
@@ -389,6 +414,7 @@ def run_pretraining(
         "device": str(device),
         "trace_logs": str(trace_logs),
         "cadets_logs": str(cadets_logs),
+        "theia_logs": str(theia_logs) if theia_logs is not None else "",
         "workspace": str(workspace),
         "best_model_path": str(best_model_path),
         "epochs_requested": epochs,
@@ -405,6 +431,7 @@ def run_pretraining(
         "val_fraction": val_fraction,
         "max_trace_sequences": max_trace_sequences,
         "max_cadets_sequences": max_cadets_sequences,
+        "max_theia_sequences": max_theia_sequences,
         "feature_scales": scales,
         "sequence_counts": {
             **{
@@ -427,6 +454,7 @@ def run_pretraining(
             host: len((allowed_subject_ids_by_host or {}).get(host, set()))
             for host in selected_hosts
         },
+        "parser_summaries": parser_summaries,
         "epoch_summaries": epoch_summaries,
     }
     (output_dir / "training_summary.json").write_text(
@@ -437,9 +465,10 @@ def run_pretraining(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Pretrain the shared TC3 stacked LSTM-GRU encoder on TRACE and CADETS.")
+    parser = argparse.ArgumentParser(description="Pretrain the TAPAS-compatible TC3 stacked LSTM-GRU encoder.")
     parser.add_argument("--trace-logs", type=Path, required=True)
     parser.add_argument("--cadets-logs", type=Path, required=True)
+    parser.add_argument("--theia-logs", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--hosts", default="trace,cadets")
     parser.add_argument("--epochs", type=int, default=24)
@@ -452,6 +481,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--max-trace-sequences", type=int, default=0)
     parser.add_argument("--max-cadets-sequences", type=int, default=50000)
+    parser.add_argument("--max-theia-sequences", type=int, default=0)
     parser.add_argument("--seed", type=int, default=173)
     return parser.parse_args()
 
@@ -461,6 +491,7 @@ def main() -> int:
     result = run_pretraining(
         trace_logs=args.trace_logs,
         cadets_logs=args.cadets_logs,
+        theia_logs=args.theia_logs,
         output_dir=args.output_dir,
         hosts=tuple(host.strip() for host in args.hosts.split(",") if host.strip()),
         epochs=args.epochs,
@@ -473,6 +504,7 @@ def main() -> int:
         val_fraction=args.val_fraction,
         max_trace_sequences=None if args.max_trace_sequences <= 0 else args.max_trace_sequences,
         max_cadets_sequences=None if args.max_cadets_sequences <= 0 else args.max_cadets_sequences,
+        max_theia_sequences=None if args.max_theia_sequences <= 0 else args.max_theia_sequences,
         seed=args.seed,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

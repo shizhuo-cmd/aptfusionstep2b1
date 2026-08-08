@@ -1001,6 +1001,7 @@ def filters(
         child_threshold=2,
         split_mode="fanout",
         count_segmented_children_upstream=False,
+        return_sequence_histories=False,
 ):
     data_list=os.listdir(data_path)
     syspath = './data/linux_system_path.txt'
@@ -1014,10 +1015,7 @@ def filters(
     objvec = {}
     subjhistory = {}
     raw_subject_time_ranges = {}
-    subjswap = {}
-    subject_seen = set()
-    apg_subject_tgids = {}
-    thread_subjects_merged_by_tgid = 0
+    subject_rows = []
     subjhisvec = {}
     padict = {}
     chdict = {}
@@ -1040,8 +1038,6 @@ def filters(
                         subject_uuid = event_data['subject']['com.bbn.tc.schema.avro.cdm18.UUID']
                         object_uuid = event_data['predicateObject'][
                             'com.bbn.tc.schema.avro.cdm18.UUID']
-                        if subject_uuid in subjswap.keys():
-                            subject_uuid = subjswap[subject_uuid]
                         key = tuple([eveid, subject_uuid, object_uuid])
                         ''''''
                         if key not in events_seen:
@@ -1056,54 +1052,15 @@ def filters(
                     output = ""
                     if 'com.bbn.tc.schema.avro.cdm18.Subject' in js['datum']:
                         subject_data = js['datum']['com.bbn.tc.schema.avro.cdm18.Subject']
-                        raw_subjectuuid = subject_data['uuid']
-                        subjectuuid = raw_subjectuuid
-                        parentuuid = subject_data['parentSubject']['com.bbn.tc.schema.avro.cdm18.UUID']
-                        subject_seen.add(raw_subjectuuid)
-                        subtgid = "Unknown"
-                        if "tgid" in subject_data['properties']['map']:
-                            subtgid = subject_data['properties']['map']['tgid']
-
-                        # The TAPAS thread rule merges a Subject only when its
-                        # already-known parent has the same tgid.  Matching a
-                        # sibling's parent/tgid/path is not evidence of a thread.
-                        canonical_parent = subjswap.get(parentuuid, parentuuid)
-                        parent_tgid = apg_subject_tgids.get(parentuuid)
-                        if subtgid != "Unknown" and parent_tgid == subtgid:
-                            subjswap[raw_subjectuuid] = canonical_parent
-                            apg_subject_tgids[raw_subjectuuid] = parent_tgid
-                            thread_subjects_merged_by_tgid += 1
-                            continue
-
-                        apg_subject_tgids[raw_subjectuuid] = subtgid
-                        parentuuid = canonical_parent
-                        if parentuuid == 'Unknow':
-                            continue
-                        if subjectuuid in chdict:
-                            if chdict[subjectuuid] == parentuuid:
-                                continue
-                            else:
-                                nearpare = chdict[subjectuuid]
-                                if nearpare in padict:
-                                    if len(padict[nearpare]) == 1:
-                                        if padict[nearpare][0] == subjectuuid:
-                                            padict.pop(nearpare)
-                                        else:
-                                            continue
-                                    else:
-                                        padict[nearpare].remove(subjectuuid)
-
-                                    if parentuuid in padict:
-                                        padict[parentuuid].append(subjectuuid)
-                                    else:
-                                        padict[parentuuid] = [subjectuuid]
-                                    chdict[subjectuuid] = parentuuid
-                        else:
-                            chdict[subjectuuid] = parentuuid
-                            if parentuuid in padict:
-                                padict[parentuuid].append(subjectuuid)
-                            else:
-                                padict[parentuuid] = [subjectuuid]
+                        subject_rows.append(
+                            {
+                                'uuid': str(subject_data.get('uuid', '')).strip(),
+                                'parentuuid': str(_subject_parent_uuid(subject_data)).strip(),
+                                'process_id': str(subject_data.get('cid', '0')),
+                                'tgid': _subject_tgid(subject_data),
+                                'subject_type': str(subject_data.get('type', '')),
+                            }
+                        )
 
 
 
@@ -1176,6 +1133,33 @@ def filters(
                         objvec[subject_data['uuid']] = ["3", str(location), str(srcp), str(dstp)]
                     else:
                         continue
+
+    # E3-THEIA files may list an execution unit before its owner process.
+    # Build the complete Subject catalogue first, then recursively merge both
+    # SUBJECT_THREAD and SUBJECT_UNIT activity into the owning process.
+    owner_by_uuid, process_parent_by_owner = _resolve_thread_subject_owners(subject_rows)
+    raw_to_canonical = {
+        str(raw_uuid): str(owner_by_uuid.get(raw_uuid, raw_uuid))
+        for raw_uuid in owner_by_uuid
+    }
+    canonical_subject_list = []
+    seen_subjects = set()
+    for row in subject_rows:
+        raw_subject = str(row.get('uuid', '')).strip()
+        canonical_subject = raw_to_canonical.get(raw_subject, raw_subject)
+        if not canonical_subject or canonical_subject != raw_subject or canonical_subject in seen_subjects:
+            continue
+        parent_subject = process_parent_by_owner.get(canonical_subject, 'Unknow')
+        canonical_parent = raw_to_canonical.get(str(parent_subject), str(parent_subject))
+        if canonical_parent == canonical_subject:
+            canonical_parent = 'Unknow'
+        canonical_subject_list.append(
+            ['1', canonical_subject, canonical_parent, str(row.get('process_id', '0'))]
+        )
+        seen_subjects.add(canonical_subject)
+
+    events_seen = _remap_event_subjects(events_seen, raw_to_canonical)
+    padict, chdict = _normalize_task_maps(canonical_subject_list)
     task_components = None
     segmented = set()
     if return_task_components:
@@ -1199,32 +1183,16 @@ def filters(
     else:
         task_component_diagnostics = []
 
-    canonical_subject_time_ranges = None
-    if return_task_components:
-        canonical_subject_time_ranges = {}
-        for raw_uuid, value in raw_subject_time_ranges.items():
-            canonical_uuid = subjswap.get(raw_uuid, raw_uuid)
-            current = canonical_subject_time_ranges.get(canonical_uuid)
-            if current is None:
-                canonical_subject_time_ranges[canonical_uuid] = [
-                    float(value[0]),
-                    float(value[1]),
-                    int(value[2]),
-                ]
-            else:
-                if value[0] < current[0]:
-                    current[0] = float(value[0])
-                if value[1] > current[1]:
-                    current[1] = float(value[1])
-                current[2] = int(current[2]) + int(value[2])
-
     thread_merge_metadata = {
-        'raw_subject_to_canonical_node': {
-            str(subject_uuid): str(subjswap.get(subject_uuid, subject_uuid))
-            for subject_uuid in subject_seen
-        },
-        'thread_merge_rule': 'parent_subject_known_and_same_tgid',
-        'thread_subjects_merged_by_tgid': int(thread_subjects_merged_by_tgid),
+        'raw_subject_to_canonical_node': raw_to_canonical,
+        'thread_merge_rule': 'recursive_parent_subject_for_thread_and_subject_unit',
+        'thread_subjects_merged_by_tgid': int(
+            sum(1 for raw_subject, owner_subject in raw_to_canonical.items() if raw_subject != owner_subject)
+        ),
+        'canonical_subject_time_ranges': _canonicalize_subject_time_ranges(
+            raw_subject_time_ranges,
+            raw_to_canonical,
+        ),
     }
     del chdict
     gc.collect()
@@ -1237,6 +1205,14 @@ def filters(
             subjhistory[event[1]].append(evevec)
         else:
             subjhistory[event[1]] = [evevec]
+
+    if return_sequence_histories:
+        return subjhistory, {
+            'raw_subject_count': int(len(subject_rows)),
+            'canonical_process_subject_count': int(len(canonical_subject_list)),
+            'active_sequence_subject_count': int(len(subjhistory)),
+            'parser_metadata': thread_merge_metadata,
+        }
 
     del events_seen
     del objvec
@@ -1275,7 +1251,6 @@ def filters(
             subjhisvec[subj] = vec
 
     del subjhistory
-    del subject_seen
     gc.collect()
 
     if return_task_components:
@@ -1287,14 +1262,7 @@ def filters(
             'split_mode': str(split_mode),
             'count_segmented_children_upstream': bool(count_segmented_children_upstream),
             'task_component_diagnostics': task_component_diagnostics,
-            'subject_time_ranges': {
-                str(subject_uuid): {
-                    'first_timestamp_sec': float(value[0]),
-                    'last_timestamp_sec': float(value[1]),
-                    'event_count': int(value[2]),
-                }
-                for subject_uuid, value in (canonical_subject_time_ranges or {}).items()
-            },
+            'subject_time_ranges': thread_merge_metadata['canonical_subject_time_ranges'],
             'parser_metadata': thread_merge_metadata,
         }, subjhisvec
     return chi_pa, subjhisvec
